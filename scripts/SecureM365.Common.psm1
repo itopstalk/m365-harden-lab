@@ -85,14 +85,19 @@ function Get-SecureM365GraphCollection {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [string] $Uri
+        [string] $Uri,
+
+        [hashtable] $Headers = @{}
     )
 
     $items = [System.Collections.Generic.List[object]]::new()
     $nextLink = $Uri
 
     while ($nextLink) {
-        $page = Invoke-MgGraphRequest -Method GET -Uri $nextLink -ErrorAction Stop
+        $page = Invoke-MgGraphRequest -Method GET -Uri $nextLink -Headers $Headers -ErrorAction Stop
+        if ($null -eq $page.value) {
+            throw "Microsoft Graph returned no collection value for '$nextLink'."
+        }
         foreach ($item in @($page.value)) {
             [void] $items.Add($item)
         }
