@@ -61,7 +61,8 @@ function Connect-SecureM365Teams {
         [Parameter(Mandatory)]
         [guid] $TenantId,
 
-        [switch] $UseDeviceAuthentication
+        [switch] $UseDeviceAuthentication,
+        [switch] $ValidateMeetingPolicyAccess
     )
 
     $connectParameters = @{
@@ -76,6 +77,29 @@ function Connect-SecureM365Teams {
     if ([string] $connection.TenantId -ne $TenantId.Guid) {
         Disconnect-MicrosoftTeams -ErrorAction SilentlyContinue
         throw "Microsoft Teams connected to tenant '$($connection.TenantId)' instead of '$($TenantId.Guid)'."
+    }
+
+    if ($ValidateMeetingPolicyAccess) {
+        try {
+            $globalPolicy = @(Get-CsTeamsMeetingPolicy -Identity Global -ErrorAction Stop)
+            if ($globalPolicy.Count -ne 1 -or $globalPolicy[0].Identity -ne "Global") {
+                throw "Microsoft Teams did not return the Global meeting policy."
+            }
+        }
+        catch {
+            $details = $_.Exception.Message
+            if (-not [string]::IsNullOrWhiteSpace($_.ErrorDetails.Message)) {
+                $details += " $($_.ErrorDetails.Message)"
+            }
+            throw [System.InvalidOperationException]::new(
+                "Microsoft Teams connected to tenant '$($TenantId.Guid)', but reading the Global meeting policy failed. " +
+                "For Forbidden/Access Denied, verify the Teams account has an active role permitted to read meeting policies " +
+                "(for example, Teams Communications Administrator). Activate PIM if needed and allow role changes to propagate, " +
+                "then run Disconnect-MicrosoftTeams and rerun script 01 with -IncludeTeams. Graph consent does not grant Teams permissions. " +
+                "Original error: $details",
+                $_.Exception
+            )
+        }
     }
 
     $connection

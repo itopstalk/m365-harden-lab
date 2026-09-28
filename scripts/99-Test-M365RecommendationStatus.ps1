@@ -52,6 +52,17 @@ Use device authentication for Microsoft Teams.
 .PARAMETER PassThru
 Also return the 11 structured result objects for filtering or export.
 
+.NOTES
+The script loads its datasets before printing check 1, so data-read warnings can
+appear before the first check. A failed read leaves dependent checks UNKNOWN.
+
+Before running this report, use script 01 with -IncludeTeams to verify Teams
+meeting-policy read access. Installing modules or consenting to Microsoft Graph
+scopes does not grant Teams permissions. For Teams Forbidden/Access Denied, verify
+the Teams account has an active role permitted to read meeting policies, such as
+Teams Communications Administrator. If using PIM, activate the role, allow it to
+propagate, then run Disconnect-MicrosoftTeams and rerun script 01 -IncludeTeams.
+
 .EXAMPLE
 .\99-Test-M365RecommendationStatus.ps1
 
@@ -493,20 +504,22 @@ $readers = [ordered]@{
         Get-SecureM365GraphCollection `
             -Uri 'https://graph.microsoft.com/v1.0/reports/authenticationMethods/userRegistrationDetails?$top=999'
     }
+    # Role-management endpoints do not support $top; the collection helper follows nextLink.
     RoleDefinitions = {
         Get-SecureM365GraphCollection `
-            -Uri 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?$select=id,templateId,displayName,isBuiltIn&$top=999'
+            -Uri 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?$select=id,templateId,displayName,isBuiltIn'
     }
     RoleAssignments = {
         Get-SecureM365GraphCollection `
-            -Uri 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?$select=id,principalId,roleDefinitionId,directoryScopeId,appScopeId&$top=999'
+            -Uri 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?$select=id,principalId,roleDefinitionId,directoryScopeId,appScopeId'
     }
     Authorization = {
         Invoke-MgGraphRequest -Method GET `
             -Uri 'https://graph.microsoft.com/v1.0/policies/authorizationPolicy' -ErrorAction Stop
     }
     Teams = {
-        Connect-SecureM365Teams -TenantId $TenantId -UseDeviceAuthentication:$UseTeamsDeviceAuthentication | Out-Null
+        Connect-SecureM365Teams -TenantId $TenantId -ValidateMeetingPolicyAccess `
+            -UseDeviceAuthentication:$UseTeamsDeviceAuthentication | Out-Null
         Get-CsTeamsMeetingPolicy -ErrorAction Stop
     }
 }
@@ -518,7 +531,10 @@ foreach ($name in $readers.Keys) {
     }
     catch {
         $readFailures[$name] = $_.Exception.Message
-        Write-Warning "Could not read ${name}: $($_.Exception.Message). Dependent checks will report UNKNOWN unless other evidence is sufficient."
+        if (-not [string]::IsNullOrWhiteSpace($_.ErrorDetails.Message)) {
+            $readFailures[$name] += " $($_.ErrorDetails.Message)"
+        }
+        Write-Warning "Could not read ${name}: $($readFailures[$name]). Dependent checks will report UNKNOWN unless other evidence is sufficient."
     }
 }
 

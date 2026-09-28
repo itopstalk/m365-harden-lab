@@ -51,7 +51,7 @@ $adminRoleNames = @(
 )
 
 $roleDefinitions = Get-SecureM365GraphCollection `
-    -Uri 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?$select=id,templateId,displayName&$top=999'
+    -Uri 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?$select=id,templateId,displayName'
 $requiredRoleIds = @(
     $roleDefinitions |
     Where-Object { $_.displayName -in $adminRoleNames } |
