@@ -66,7 +66,6 @@ function Add-FixtureRole {
         principalId = $PrincipalId
         roleDefinitionId = $script:templates[$Name]
         directoryScopeId = $Scope
-        appScopeId = $null
     }
     [void] $script:fixture.Assignments.Add($assignment)
 }
@@ -171,6 +170,12 @@ Describe "05 administrator permission verification (offline)" {
             if ($path -like "/v1.0/roleManagement/*" -and $address.Query -match '(\?|&)\$top=') {
                 throw "Role-management endpoints must not receive `$top."
             }
+            if (
+                $path -eq "/v1.0/roleManagement/directory/roleAssignments" -and
+                [uri]::UnescapeDataString($address.Query) -match '(?i)(?:\?|&)\$select=[^&]*\bappScopeId\b'
+            ) {
+                throw "Request_BadRequest: Could not find a property named 'appScopeId' on type 'Microsoft.DirectoryServices.RoleAssignment'."
+            }
             if ($Method -eq "POST") {
                 $path | Should Be "/v1.0/roleManagement/directory/roleAssignments" | Out-Null
                 $ContentType | Should Be "application/json" | Out-Null
@@ -258,6 +263,30 @@ Describe "05 administrator permission verification (offline)" {
             throw "Invalid mock page: $($page | ConvertTo-Json -Depth 5 -Compress)"
         }
         @($page.value).Count | Should Be 0
+    }
+
+    It "rejects appScopeId selections like the directory role service" {
+        {
+            Invoke-MgGraphRequest -Method GET `
+                -Uri 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?$select=id,appScopeId'
+        } | Should Throw "Could not find a property named 'appScopeId'"
+    }
+
+    It "reads every role-assignment page in script 99 without selecting appScopeId" {
+        Add-FixtureRole "Privileged Role Administrator"
+        Add-FixtureRole "User Administrator" -Scope "/administrativeUnits/test"
+        $script:fixture.Paged = $true
+        $reportSource = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $scriptsRoot "99-Test-M365RecommendationStatus.ps1"), [ref] $null, [ref] $null
+        )
+        $readersStatement = $reportSource.EndBlock.Statements | Where-Object { $_.Left.Extent.Text -eq '$readers' }
+        $readers = & ([scriptblock]::Create($readersStatement.Right.Extent.Text))
+        $assignments = @(& $readers.RoleAssignments)
+        $assignments.Count | Should Be 2
+        $assignments[0].directoryScopeId | Should Be "/"
+        $assignments[1].directoryScopeId | Should Be "/administrativeUnits/test"
+        $assignments[0].ContainsKey("appScopeId") | Should Be $false
+        $script:fixture.RoleReads | Should Be 2
     }
 
     It "recognizes Global Administrator without adding other roles" {

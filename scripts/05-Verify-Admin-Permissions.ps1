@@ -13,6 +13,8 @@ by scripts 00-99. Uses Microsoft Graph v1.0 in the worldwide cloud.
 Lists missing role coverage before offering permanent, active, tenant-wide role
 assignments to the signed-in user. Each assignment requires confirmation.
 Recognizes broader built-in roles and active role-assignable group membership.
+Directory-role queries use directoryScopeId; appScopeId is not selected because
+the directory provider rejects it even though it appears in the shared Graph schema.
 Never assigns Global Administrator, changes group membership, or switches to a
 different administrator. Without an active tenant-wide Privileged Role
 Administrator or Global Administrator assignment, stops and reports the gaps.
@@ -231,7 +233,7 @@ function Get-AdminActiveRoles {
         }
     }
     $assignments = @(Get-SecureM365GraphCollection `
-        -Uri 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?$select=id,principalId,roleDefinitionId,directoryScopeId,appScopeId')
+        -Uri 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?$select=id,principalId,roleDefinitionId,directoryScopeId')
     foreach ($assignment in $assignments) {
         if ([string]::IsNullOrWhiteSpace($assignment.principalId)) {
             throw "Graph returned a role assignment without a principal ID."
@@ -329,7 +331,7 @@ try {
     $activeRoles = @(Get-AdminActiveRoles)
 }
 catch {
-    throw "Cannot safely inventory administrator roles. Check RoleManagement.Read.Directory / Directory.Read.All consent and directory read access. No roles were assigned. $(Get-PermissionErrorDetail $_)"
+    throw "Cannot safely inventory administrator roles. No roles were assigned. For authorization failures, check RoleManagement.Read.Directory / Directory.Read.All consent and directory read access. Graph error: $(Get-PermissionErrorDetail $_)"
 }
 $effectiveIds = @($activeRoles | Where-Object { $_.TenantWide -and $_.IsBuiltIn } | ForEach-Object { $_.TemplateId })
 $roleCoverage = @(Get-RoleCoverage -TemplateIds $effectiveIds)

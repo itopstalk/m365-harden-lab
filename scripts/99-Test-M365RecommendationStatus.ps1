@@ -510,8 +510,9 @@ $readers = [ordered]@{
             -Uri 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?$select=id,templateId,displayName,isBuiltIn'
     }
     RoleAssignments = {
+        # The directory provider rejects appScopeId in $select; scope is directoryScopeId.
         Get-SecureM365GraphCollection `
-            -Uri 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?$select=id,principalId,roleDefinitionId,directoryScopeId,appScopeId'
+            -Uri 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?$select=id,principalId,roleDefinitionId,directoryScopeId'
     }
     Authorization = {
         Invoke-MgGraphRequest -Method GET `
