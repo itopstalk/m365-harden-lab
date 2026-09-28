@@ -155,6 +155,40 @@ function Get-SecureM365TeamsMeetingPolicy {
     $policies
 }
 
+function Get-SecureM365TeamsMeetingPolicyUpdateError {
+    [CmdletBinding()]
+    [OutputType([System.Management.Automation.ErrorRecord])]
+    param(
+        [Parameter(Mandatory)]
+        [string] $PolicyIdentity,
+
+        [Parameter(Mandatory)]
+        [System.Management.Automation.ErrorRecord] $ErrorRecord
+    )
+
+    $details = $ErrorRecord.Exception.Message
+    if (-not [string]::IsNullOrWhiteSpace($ErrorRecord.ErrorDetails.Message)) {
+        $details += " $($ErrorRecord.ErrorDetails.Message)"
+    }
+    # Ordinary authorization and validation failures must retain their original errors.
+    if ($details -notmatch "Tenant Admin can't modify first party documents") {
+        return $ErrorRecord
+    }
+
+    $message = "Teams policy '$PolicyIdentity' is a Microsoft-managed read-only preset. " +
+        "It cannot be edited by a tenant administrator; adding roles will not fix this error. " +
+        "Use -PolicyIdentity Global or explicitly select a tenant-created custom policy. " +
+        "Review user/group assignments before replacing a preset with a compliant policy. " +
+        "Execution stopped at this policy; remaining policies were not processed and earlier updates were not rolled back. " +
+        "Script 99 still audits read-only and unused presets. Original Teams error: $details"
+    [System.Management.Automation.ErrorRecord]::new(
+        [System.InvalidOperationException]::new($message, $ErrorRecord.Exception),
+        "SecureM365TeamsReadOnlyPolicy",
+        [System.Management.Automation.ErrorCategory]::InvalidOperation,
+        $PolicyIdentity
+    )
+}
+
 function Get-SecureM365GraphCollection {
     [CmdletBinding()]
     param(
@@ -378,6 +412,7 @@ Export-ModuleMember -Function @(
     "Connect-SecureM365Graph"
     "Connect-SecureM365Teams"
     "Get-SecureM365TeamsMeetingPolicy"
+    "Get-SecureM365TeamsMeetingPolicyUpdateError"
     "Get-SecureM365GraphCollection"
     "Get-SecureM365EnabledConditionalAccessPolicy"
     "New-SecureM365ConditionalAccessPolicy"

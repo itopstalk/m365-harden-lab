@@ -18,6 +18,9 @@ data, or manual evidence are UNKNOWN, never evidence of missing configuration.
 Teams checks include Global and every returned meeting policy, even predefined
 and unused policies. Scripts 40, 42, and 44 target this same inventory by default.
 Their -PolicyIdentity parameter can restrict updates, but does not limit this audit.
+Microsoft-managed presets are read-only. They can keep these checks NOT-CONFIGURED
+even when every editable policy matches the baseline. Review user/group assignments;
+this inventory audit does not establish which policies are effective for users.
 
 .PARAMETER TenantId
 Target tenant in the worldwide cloud. If omitted, uses the delegated Graph tenant
@@ -422,7 +425,7 @@ function Get-TeamsAssessment {
     }
     $nonCompliant = @($policies | Where-Object { $_.$Property -ne $Expected })
     if ($nonCompliant.Count -gt 0) {
-        return New-Assessment "NOT-CONFIGURED" "$Property must be '$Expected'. Policies needing changes: $($nonCompliant.Identity -join ', ')."
+        return New-Assessment "NOT-CONFIGURED" "$Property must be '$Expected'. Policies outside the baseline: $($nonCompliant.Identity -join ', '). Microsoft-managed read-only presets cannot be edited; review their assignments. This audit includes unused policies."
     }
     New-Assessment "IMPLEMENTED" "$Property is '$Expected' on all $($policies.Count) meeting policies (Global and every returned policy)."
 }

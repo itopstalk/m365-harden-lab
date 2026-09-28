@@ -6,6 +6,13 @@ $script:policyCases = @(
     @{ File = "42-Set-TeamsOrganizerOnlyPresenterPolicy.ps1"; Property = "DesignatedPresenterRoleMode"; Expected = "OrganizerOnlyUserOverride" }
     @{ File = "44-Disable-TeamsAnonymousMeetingJoin.ps1"; Property = "AllowAnonymousUsersToJoinMeeting"; Expected = $false }
 )
+$script:readOnlyCases = @(
+    foreach ($case in $script:policyCases) {
+        foreach ($source in @("Exception", "ErrorDetails")) {
+            @{ File = $case.File; Property = $case.Property; Expected = $case.Expected; ErrorSource = $source }
+        }
+    }
+)
 $script:policyScripts = @{}
 $script:policySources = @{}
 foreach ($case in $script:policyCases) {
@@ -35,6 +42,7 @@ foreach ($name in @("SecureM365.Common.psm1", "99-Test-M365RecommendationStatus.
             $statement -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
             $statement.Name -in @(
                 "Connect-SecureM365Teams", "Get-SecureM365TeamsMeetingPolicy",
+                "Get-SecureM365TeamsMeetingPolicyUpdateError",
                 "New-Assessment", "Get-CheckData", "Get-TeamsAssessment"
             )
         ) {
@@ -71,8 +79,8 @@ Describe "Teams meeting policy target selection (offline)" {
             TenantId = "11111111-1111-4111-8111-111111111111"
             Policies = @(
                 foreach ($identity in @(
-                    "Global", "Tag:AllOn", "Tag:RestrictedAnonymousAccess", "Tag:AllOff",
-                    "Tag:RestrictedAnonymousNoRecording", "Tag:Default", "Tag:Kiosk"
+                    "Global", "Tag:LabMeetings", "Tag:ExternalMeetings", "Tag:InternalMeetings",
+                    "Tag:Training", "Tag:Events", "Tag:KioskCustom"
                 )) {
                     [pscustomobject]@{
                         Identity = $identity
@@ -91,6 +99,7 @@ Describe "Teams meeting policy target selection (offline)" {
             WrongTenant = $false
             FailEnumeration = $false
             RejectIdentity = $null
+            RejectError = $null
             WrongReadIdentity = $false
         }
         Mock Connect-MicrosoftTeams {
@@ -121,7 +130,10 @@ Describe "Teams meeting policy target selection (offline)" {
         Mock Set-CsTeamsMeetingPolicy {
             param($Identity, $AutoAdmittedUsers, $DesignatedPresenterRoleMode, $AllowAnonymousUsersToJoinMeeting)
             [void] $script:fixture.Attempts.Add($Identity)
-            if ($Identity -eq $script:fixture.RejectIdentity) { throw "Teams rejected update to policy '$Identity'." }
+            if ($Identity -eq $script:fixture.RejectIdentity) {
+                if ($null -ne $script:fixture.RejectError) { throw $script:fixture.RejectError }
+                throw "Teams rejected update to policy '$Identity'."
+            }
             $updates = @{}
             if ($null -ne $AutoAdmittedUsers) { $updates.AutoAdmittedUsers = $AutoAdmittedUsers }
             if ($null -ne $DesignatedPresenterRoleMode) { $updates.DesignatedPresenterRoleMode = $DesignatedPresenterRoleMode }
@@ -159,9 +171,9 @@ Describe "Teams meeting policy target selection (offline)" {
 
     It "updates only explicitly selected identities in <File>" -TestCases $script:policyCases {
         param($File, $Property, $Expected)
-        $result = @(Invoke-PolicyScript $File @{ PolicyIdentity = @("AllOn", "Tag:Kiosk") })
+        $result = @(Invoke-PolicyScript $File @{ PolicyIdentity = @("LabMeetings", "Tag:KioskCustom") })
         $result.Count | Should Be 2
-        ($script:fixture.Writes.Identity -join ",") | Should Be "Tag:AllOn,Tag:Kiosk"
+        ($script:fixture.Writes.Identity -join ",") | Should Be "Tag:LabMeetings,Tag:KioskCustom"
         @($result | Where-Object { $_.$Property -ne $Expected }).Count | Should Be 0
         $script:fixture.Policies[0].$Property | Should Not Be $Expected
     }
@@ -254,12 +266,76 @@ Describe "Teams meeting policy target selection (offline)" {
 
     It "stops on a rejected policy without silently skipping it in <File>" -TestCases $script:policyCases {
         param($File, $Property, $Expected)
-        $script:fixture.RejectIdentity = "Tag:AllOn"
+        $script:fixture.RejectIdentity = "Tag:LabMeetings"
         { Invoke-PolicyScript $File @{ AllPolicies = $true } } | Should Throw "Teams rejected update"
         $script:fixture.Attempts.Count | Should Be 2
         $script:fixture.Writes.Count | Should Be 1
         $script:fixture.Policies[0].$Property | Should Be $Expected
         $script:fixture.Policies[1].$Property | Should Not Be $Expected
+    }
+
+    It "stops with read-only policy guidance in <File> for an <ErrorSource> rejection" -TestCases $script:readOnlyCases {
+        param($File, $Property, $Expected, $ErrorSource)
+        $script:fixture.Policies[1].Identity = "Tag:AllOn"
+        $script:fixture.RejectIdentity = "Tag:AllOn"
+        $rejection = "Invalid input parameters Tenant Admin can't modify first party documents Please check your request parameters. CorrelationId: fixture-correlation"
+        $message = if ($ErrorSource -eq "Exception") { $rejection } else { "Invalid input parameters." }
+        $original = [System.Management.Automation.ErrorRecord]::new(
+            [System.InvalidOperationException]::new($message),
+            "TeamsFirstPartyDocument",
+            [System.Management.Automation.ErrorCategory]::InvalidArgument,
+            "Tag:AllOn"
+        )
+        if ($ErrorSource -eq "ErrorDetails") {
+            $original.ErrorDetails = [System.Management.Automation.ErrorDetails]::new(
+                (@{ message = $rejection } | ConvertTo-Json -Compress)
+            )
+        }
+        $script:fixture.RejectError = $original
+        $caught = $null
+        try { $null = Invoke-PolicyScript $File } catch { $caught = $_ }
+        if ($null -eq $caught) { throw "The read-only policy rejection did not stop execution." }
+        $caught.FullyQualifiedErrorId | Should Match "SecureM365TeamsReadOnlyPolicy"
+        $caught.TargetObject | Should Be "Tag:AllOn"
+        $caught.Exception.Message | Should Match "Microsoft-managed read-only"
+        $caught.Exception.Message | Should Match "-PolicyIdentity Global"
+        $caught.Exception.Message | Should Match "custom policy"
+        $caught.Exception.Message | Should Match "not rolled back"
+        $caught.Exception.Message | Should Match "fixture-correlation"
+        $caught.Exception.InnerException.Message | Should Be $original.Exception.Message
+        ($script:fixture.Attempts -join ",") | Should Be "Global,Tag:AllOn"
+        $script:fixture.Writes.Count | Should Be 1
+        $script:fixture.Policies[0].$Property | Should Be $Expected
+        @($script:fixture.Policies | Select-Object -Skip 1 | Where-Object { $_.$Property -eq $Expected }).Count | Should Be 0
+
+        $readFailures = @{}
+        $data = @{ Teams = $script:fixture.Policies }
+        $assessment = Get-TeamsAssessment -Property $Property -Expected $Expected
+        $assessment.Status | Should Be "NOT-CONFIGURED"
+        $assessment.Details | Should Match "Tag:AllOn"
+        $assessment.Details | Should Match "read-only"
+    }
+
+    It "preserves ordinary access-denied errors in <File> without misclassifying them" -TestCases $script:policyCases {
+        param($File, $Property, $Expected)
+        $script:fixture.RejectIdentity = "Tag:LabMeetings"
+        $original = [System.Management.Automation.ErrorRecord]::new(
+            [System.UnauthorizedAccessException]::new("Forbidden: Access Denied."),
+            "TeamsAccessDenied",
+            [System.Management.Automation.ErrorCategory]::PermissionDenied,
+            "Tag:LabMeetings"
+        )
+        $original.ErrorDetails = [System.Management.Automation.ErrorDetails]::new('{"code":"Forbidden","message":"Request access."}')
+        $script:fixture.RejectError = $original
+        $caught = $null
+        try { $null = Invoke-PolicyScript $File } catch { $caught = $_ }
+        if ($null -eq $caught) { throw "The access-denied error did not stop execution." }
+        $caught.FullyQualifiedErrorId | Should Match "TeamsAccessDenied"
+        $caught.Exception.Message | Should Be $original.Exception.Message
+        $caught.ErrorDetails.Message | Should Be $original.ErrorDetails.Message
+        $caught.TargetObject | Should Be "Tag:LabMeetings"
+        $script:fixture.Attempts.Count | Should Be 2
+        $script:fixture.Writes.Count | Should Be 1
     }
 
     It "retains the tenant guard in <File>" -TestCases $script:policyCases {
@@ -283,11 +359,11 @@ Describe "Teams meeting policy target selection (offline)" {
     It "rejects a response for a different selected policy in <File>" -TestCases $script:policyCases {
         param($File, $Property, $Expected)
         $script:fixture.WrongReadIdentity = $true
-        { Invoke-PolicyScript $File @{ PolicyIdentity = @("AllOn") } } | Should Throw "requested meeting policy"
+        { Invoke-PolicyScript $File @{ PolicyIdentity = @("LabMeetings") } } | Should Throw "requested meeting policy"
         $script:fixture.Attempts.Count | Should Be 0
     }
 
-    It "keeps script 99's all-policy audit and passes it after all three updates" {
+    It "keeps script 99's all-policy audit and passes it when every policy is editable and updated" {
         foreach ($case in $script:policyCases) {
             $null = Invoke-PolicyScript $case.File @{ PolicyIdentity = @("Global") }
         }
@@ -296,7 +372,7 @@ Describe "Teams meeting policy target selection (offline)" {
         foreach ($case in $script:policyCases) {
             $assessment = Get-TeamsAssessment -Property $case.Property -Expected $case.Expected
             $assessment.Status | Should Be "NOT-CONFIGURED"
-            $assessment.Details | Should Match "Tag:AllOn"
+            $assessment.Details | Should Match "Tag:LabMeetings"
         }
         foreach ($case in $script:policyCases) {
             $null = Invoke-PolicyScript $case.File

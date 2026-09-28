@@ -61,6 +61,14 @@ every returned meeting policy by default**, including predefined and unused poli
 meeting policy** too. A compliant Global policy alone does not make the other
 policies compliant.
 
+**Microsoft-managed presets are read-only.** An update to a preset such as
+`Tag:AllOn` can fail with `Tenant Admin can't modify first party documents`.
+This is not a missing administrator role: Teams permits edits to Global and
+tenant-created custom policies, not these presets. The scripts stop at that
+rejection with the policy identity, recovery guidance, and the original error.
+They do not skip the preset, retry the write, change assignments, or roll back
+earlier updates.
+
 Preview all three changes first:
 
 ```powershell
@@ -87,10 +95,30 @@ the mandatory tenant ID and then targets all policies.
 Use `-PolicyIdentity Global` to update only Global, or supply other identities to
 target specific policies. `-AllPolicies` remains supported for compatibility but
 is no longer required; it cannot be combined with `-PolicyIdentity`.
-The scripts validate the complete target inventory before
-writing. If Teams rejects an update (for example, an unmodifiable policy or denied
-access), they stop and surface the error rather than silently skipping that
-policy. Earlier changes are not rolled back; review them before retrying.
+For example, to update the editable Global policy without targeting presets:
+
+```powershell
+.\40-Set-TeamsInvitedUsersLobbyPolicy.ps1 -TenantId $TenantId -PolicyIdentity Global
+.\42-Set-TeamsOrganizerOnlyPresenterPolicy.ps1 -TenantId $TenantId -PolicyIdentity Global
+.\44-Disable-TeamsAnonymousMeetingJoin.ps1 -TenantId $TenantId -PolicyIdentity Global
+```
+
+For tenant-created policies, replace `Global` with their identities. Do not
+exclude every `Tag:` policy: custom policies use that prefix too.
+If users or groups use a preset outside the baseline, review their assignments
+and select a compliant Global or custom policy as appropriate. The scripts do
+not perform that reassignment. See [Manage meeting policies](https://learn.microsoft.com/microsoftteams/meeting-policies-overview).
+
+The scripts validate the complete target inventory before writing. `-WhatIf`
+previews targets but cannot verify that Teams will permit an update. Other
+failures, including ordinary access-denied errors, still stop execution and keep
+their original diagnostics.
+
+Because script 99 deliberately includes read-only and unused presets, its
+all-policy checks can remain `NOT-CONFIGURED` after every editable policy is
+updated. That does not establish that users are assigned to the listed presets.
+Review assignments separately; read-only policies are not silently excluded or
+reported as compliant.
 
 Copy the updated [common module](scripts/SecureM365.Common.psm1) together with
 the updated scripts if you run them from a separate folder.

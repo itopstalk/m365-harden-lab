@@ -6,13 +6,17 @@
 Sets Teams meeting lobby bypass to invited users.
 
 .DESCRIPTION
-Updates Global and every returned meeting policy by default, including predefined
-and unused policies. Use -PolicyIdentity to restrict the targets, for example
--PolicyIdentity Global. Script 99 still audits all policies regardless of this selection.
+Attempts to update Global and every returned meeting policy by default, including
+predefined and unused policies. Only Global and tenant-created custom policies
+are editable; Microsoft-managed presets are read-only. Use -PolicyIdentity Global
+or explicitly select tenant-created policies to avoid targeting those presets.
+Script 99 still audits all policies, including read-only and unused presets.
 The full target inventory is checked before the first update. Policy assignments
 are not changed. Review -WhatIf output first; shared policy changes affect users
 assigned to them. If Teams rejects an update, the script stops without rolling
-back earlier changes. No unsupported or read-only policy is silently skipped.
+back earlier changes. The first-party read-only rejection includes guidance;
+no policy is skipped or retried, and other errors retain their original details.
+WhatIf previews targets but cannot verify whether Teams will allow an update.
 
 .PARAMETER PolicyIdentity
 Restrict updates to these policies. If omitted, all policies are targeted.
@@ -66,10 +70,16 @@ foreach ($policy in $policies) {
     $identity = [string] $policy.Identity
     if ($policy.AutoAdmittedUsers -ne "InvitedUsers") {
         if ($PSCmdlet.ShouldProcess($identity, "Set lobby bypass to invited users")) {
-            Set-CsTeamsMeetingPolicy `
-                -Identity $identity `
-                -AutoAdmittedUsers "InvitedUsers" `
-                -ErrorAction Stop
+            try {
+                Set-CsTeamsMeetingPolicy `
+                    -Identity $identity `
+                    -AutoAdmittedUsers "InvitedUsers" `
+                    -ErrorAction Stop
+            }
+            catch {
+                $errorRecord = Get-SecureM365TeamsMeetingPolicyUpdateError -PolicyIdentity $identity -ErrorRecord $_
+                $PSCmdlet.ThrowTerminatingError($errorRecord)
+            }
         }
     }
 
