@@ -15,7 +15,9 @@ Complex combinations of narrower policies may need manual review.
 MFA and SSPR checks also use the authentication-method registration report, which
 requires Entra ID P1/P2 and can lag changes by up to 36 hours. Missing permissions,
 data, or manual evidence are UNKNOWN, never evidence of missing configuration.
-Teams checks include Global and every custom meeting policy, even unused policies.
+Teams checks include Global and every returned meeting policy, even predefined
+and unused policies. Scripts 40, 42, and 44 target this same inventory by default.
+Their -PolicyIdentity parameter can restrict updates, but does not limit this audit.
 
 .PARAMETER TenantId
 Target tenant in the worldwide cloud. If omitted, uses the delegated Graph tenant
@@ -422,7 +424,7 @@ function Get-TeamsAssessment {
     if ($nonCompliant.Count -gt 0) {
         return New-Assessment "NOT-CONFIGURED" "$Property must be '$Expected'. Policies needing changes: $($nonCompliant.Identity -join ', ')."
     }
-    New-Assessment "IMPLEMENTED" "$Property is '$Expected' on all $($policies.Count) meeting policies (Global and every custom policy)."
+    New-Assessment "IMPLEMENTED" "$Property is '$Expected' on all $($policies.Count) meeting policies (Global and every returned policy)."
 }
 
 function Get-RoleBaselineAssessment {

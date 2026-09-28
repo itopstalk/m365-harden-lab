@@ -50,3 +50,47 @@ for that task.
 The returned report includes `Ready`, `MissingRoles`, `RoleCoverage`,
 `GraphPermissions`, `AccessChecks`, and `AssignmentsCreated`. Use
 `Get-Help .\05-Verify-Admin-Permissions.ps1 -Full` for details and reference links.
+
+## Teams meeting policy scope
+
+[Script 40](scripts/40-Set-TeamsInvitedUsersLobbyPolicy.ps1),
+[script 42](scripts/42-Set-TeamsOrganizerOnlyPresenterPolicy.ps1), and
+[script 44](scripts/44-Disable-TeamsAnonymousMeetingJoin.ps1) target **Global and
+every returned meeting policy by default**, including predefined and unused policies.
+[Script 99](scripts/99-Test-M365RecommendationStatus.ps1) audits **every returned
+meeting policy** too. A compliant Global policy alone does not make the other
+policies compliant.
+
+Preview all three changes first:
+
+```powershell
+.\40-Set-TeamsInvitedUsersLobbyPolicy.ps1 -TenantId $TenantId -WhatIf
+.\42-Set-TeamsOrganizerOnlyPresenterPolicy.ps1 -TenantId $TenantId -WhatIf
+.\44-Disable-TeamsAnonymousMeetingJoin.ps1 -TenantId $TenantId -WhatIf
+```
+
+After reviewing the affected policies, run without `-WhatIf`:
+
+```powershell
+.\40-Set-TeamsInvitedUsersLobbyPolicy.ps1 -TenantId $TenantId
+.\42-Set-TeamsOrganizerOnlyPresenterPolicy.ps1 -TenantId $TenantId
+.\44-Disable-TeamsAnonymousMeetingJoin.ps1 -TenantId $TenantId
+.\99-Test-M365RecommendationStatus.ps1 -TenantId $TenantId
+```
+
+Each required update prompts for confirmation. Already-compliant policies are
+not rewritten, and policy assignments are not changed. Updating a shared policy
+affects users assigned to it; review the scope before applying this outside a lab.
+Teams may need time to propagate changes. Running without parameters prompts for
+the mandatory tenant ID and then targets all policies.
+
+Use `-PolicyIdentity Global` to update only Global, or supply other identities to
+target specific policies. `-AllPolicies` remains supported for compatibility but
+is no longer required; it cannot be combined with `-PolicyIdentity`.
+The scripts validate the complete target inventory before
+writing. If Teams rejects an update (for example, an unmodifiable policy or denied
+access), they stop and surface the error rather than silently skipping that
+policy. Earlier changes are not rolled back; review them before retrying.
+
+Copy the updated [common module](scripts/SecureM365.Common.psm1) together with
+the updated scripts if you run them from a separate folder.

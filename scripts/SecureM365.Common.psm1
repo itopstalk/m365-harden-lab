@@ -105,6 +105,56 @@ function Connect-SecureM365Teams {
     $connection
 }
 
+function Get-SecureM365TeamsMeetingPolicy {
+    [CmdletBinding(DefaultParameterSetName = "SelectedPolicies")]
+    param(
+        [Parameter(ParameterSetName = "SelectedPolicies")]
+        [ValidateNotNullOrEmpty()]
+        [string[]] $PolicyIdentity = @("Global"),
+
+        [Parameter(Mandatory, ParameterSetName = "AllPolicies")]
+        [switch] $AllPolicies
+    )
+
+    $policies = @(
+        if ($AllPolicies) {
+            Get-CsTeamsMeetingPolicy -ErrorAction Stop
+        }
+        else {
+            foreach ($identity in $PolicyIdentity) {
+                if ([string]::IsNullOrWhiteSpace($identity)) {
+                    throw "Supply a nonempty Teams meeting policy identity."
+                }
+                $matches = @(Get-CsTeamsMeetingPolicy -Identity $identity -ErrorAction Stop)
+                $expectedIdentity = if ($identity -eq "Global") {
+                    "Global"
+                }
+                else {
+                    "Tag:" + ($identity -replace '^Tag:', '')
+                }
+                if ($matches.Count -ne 1 -or [string] $matches[0].Identity -ne $expectedIdentity) {
+                    throw "Teams did not return exactly the requested meeting policy '$identity'. No policies were changed."
+                }
+                $matches[0]
+            }
+        }
+    )
+
+    $seen = @{}
+    foreach ($policy in $policies) {
+        $identity = [string] $policy.Identity
+        if ([string]::IsNullOrWhiteSpace($identity) -or $seen.ContainsKey($identity)) {
+            throw "Teams returned a missing or duplicate meeting policy identity. No policies were changed."
+        }
+        $seen[$identity] = $true
+    }
+    if ($policies.Count -eq 0 -or ($AllPolicies -and -not $seen.ContainsKey("Global"))) {
+        throw "Teams returned an empty or incomplete meeting policy inventory (Global is required for -AllPolicies). No policies were changed."
+    }
+
+    $policies
+}
+
 function Get-SecureM365GraphCollection {
     [CmdletBinding()]
     param(
@@ -327,6 +377,7 @@ function Test-SecureM365ScoreAction {
 Export-ModuleMember -Function @(
     "Connect-SecureM365Graph"
     "Connect-SecureM365Teams"
+    "Get-SecureM365TeamsMeetingPolicy"
     "Get-SecureM365GraphCollection"
     "Get-SecureM365EnabledConditionalAccessPolicy"
     "New-SecureM365ConditionalAccessPolicy"
