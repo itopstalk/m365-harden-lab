@@ -10,6 +10,8 @@ Validates the Microsoft Graph tenant, delegated authentication, and consented sc
 With -IncludeTeams, also validates the Teams tenant and reads the Global meeting
 policy to check access. A successful sign-in alone does not verify Teams permissions.
 Run with -IncludeTeams before script 99 to detect Teams access failures early.
+Use script 05 before configuration scripts to check all required administrator
+roles and Graph permissions and, with confirmation, assign missing lab roles.
 
 .PARAMETER IncludeTeams
 Also connect to Microsoft Teams and verify meeting-policy read access. The Teams
