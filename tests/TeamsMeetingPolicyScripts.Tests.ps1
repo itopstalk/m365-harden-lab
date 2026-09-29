@@ -53,7 +53,13 @@ foreach ($name in @("SecureM365.Common.psm1", "99-Test-M365RecommendationStatus.
 
 function Connect-MicrosoftTeams {
     [CmdletBinding()]
-    param([string] $TenantId, [switch] $UseDeviceAuthentication)
+    param(
+        [string] $TenantId,
+        [switch] $UseDeviceAuthentication,
+        [string] $ApplicationId,
+        [string] $CertificateThumbprint,
+        [Security.Cryptography.X509Certificates.X509Certificate2] $Certificate
+    )
     throw "Unmocked Teams connection."
 }
 function Disconnect-MicrosoftTeams { [CmdletBinding()] param() throw "Unmocked Teams disconnect." }
@@ -96,6 +102,8 @@ Describe "Teams meeting policy target selection (offline)" {
             Connections = 0
             Disconnected = $false
             DeviceAuthentication = $false
+            ApplicationId = $null
+            CertificateThumbprint = $null
             WrongTenant = $false
             FailEnumeration = $false
             RejectIdentity = $null
@@ -103,9 +111,11 @@ Describe "Teams meeting policy target selection (offline)" {
             WrongReadIdentity = $false
         }
         Mock Connect-MicrosoftTeams {
-            param($TenantId, $UseDeviceAuthentication)
+            param($TenantId, $UseDeviceAuthentication, $ApplicationId, $CertificateThumbprint, $Certificate)
             $script:fixture.Connections++
             $script:fixture.DeviceAuthentication = [bool] $UseDeviceAuthentication
+            $script:fixture.ApplicationId = [string] $ApplicationId
+            $script:fixture.CertificateThumbprint = [string] $CertificateThumbprint
             [pscustomobject]@{
                 TenantId = if ($script:fixture.WrongTenant) { "22222222-2222-4222-8222-222222222222" } else { $TenantId }
                 Account = "lab-admin@example.com"
@@ -356,6 +366,22 @@ Describe "Teams meeting policy target selection (offline)" {
         ($binding.NamedArguments | Where-Object ArgumentName -eq "ConfirmImpact").Argument.SafeGetValue() | Should Be "High"
     }
 
+    It "routes certificate application authentication in <File>" -TestCases $script:policyCases {
+        param($File, $Property, $Expected)
+        $appId = "55555555-5555-4555-8555-555555555555"
+        $thumbprint = "0123456789ABCDEF0123456789ABCDEF01234567"
+
+        $null = Invoke-PolicyScript $File @{
+            AllPolicies = $true
+            TeamsApplicationId = [guid] $appId
+            TeamsCertificateThumbprint = $thumbprint
+        }
+
+        $script:fixture.ApplicationId | Should Be $appId
+        $script:fixture.CertificateThumbprint | Should Be $thumbprint
+        $script:fixture.DeviceAuthentication | Should Be $false
+    }
+
     It "rejects a response for a different selected policy in <File>" -TestCases $script:policyCases {
         param($File, $Property, $Expected)
         $script:fixture.WrongReadIdentity = $true
@@ -379,5 +405,36 @@ Describe "Teams meeting policy target selection (offline)" {
             $assessment = Get-TeamsAssessment -Property $case.Property -Expected $case.Expected
             $assessment.Status | Should Be "IMPLEMENTED"
         }
+    }
+
+    It "never falls back to delegated authentication when certificate application auth is incomplete" {
+        {
+            Connect-SecureM365Teams `
+                -TenantId ([guid] $script:fixture.TenantId) `
+                -ApplicationId "55555555-5555-4555-8555-555555555555"
+        } | Should Throw "exactly one"
+        $script:fixture.Connections | Should Be 0
+    }
+
+    It "rejects device authentication combined with certificate application auth before connecting" {
+        {
+            Connect-SecureM365Teams `
+                -TenantId ([guid] $script:fixture.TenantId) `
+                -ApplicationId "55555555-5555-4555-8555-555555555555" `
+                -CertificateThumbprint "0123456789ABCDEF0123456789ABCDEF01234567" `
+                -UseDeviceAuthentication
+        } | Should Throw "cannot be combined"
+        $script:fixture.Connections | Should Be 0
+    }
+
+    It "disconnects and rejects a tenant mismatch for certificate application auth" {
+        $script:fixture.WrongTenant = $true
+        {
+            Connect-SecureM365Teams `
+                -TenantId ([guid] $script:fixture.TenantId) `
+                -ApplicationId "55555555-5555-4555-8555-555555555555" `
+                -CertificateThumbprint "0123456789ABCDEF0123456789ABCDEF01234567"
+        } | Should Throw "instead of"
+        $script:fixture.Disconnected | Should Be $true
     }
 }

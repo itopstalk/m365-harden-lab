@@ -26,6 +26,17 @@ Cannot be combined with -AllPolicies.
 Optional compatibility switch; all policies are already the default.
 Use -PolicyIdentity Global to restrict updates to Global.
 
+.PARAMETER TeamsApplicationId
+Use the dedicated Teams application instead of delegated authentication.
+Requires exactly one of TeamsCertificateThumbprint or TeamsCertificatePath.
+
+.PARAMETER TeamsCertificateThumbprint
+Thumbprint in Cert:\CurrentUser\My for the Teams application certificate.
+
+.PARAMETER TeamsCertificatePath
+Path to a PFX outside this repository. Supply its runtime SecureString password
+with TeamsCertificatePassword when needed.
+
 .EXAMPLE
 .\44-Disable-TeamsAnonymousMeetingJoin.ps1 -TenantId $TenantId -WhatIf
 
@@ -48,7 +59,11 @@ param(
     [Parameter(ParameterSetName = "AllPolicies")]
     [switch] $AllPolicies,
 
-    [switch] $UseDeviceAuthentication
+    [switch] $UseDeviceAuthentication,
+    [guid] $TeamsApplicationId,
+    [string] $TeamsCertificateThumbprint,
+    [string] $TeamsCertificatePath,
+    [securestring] $TeamsCertificatePassword
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,7 +71,11 @@ Import-Module (Join-Path $PSScriptRoot "SecureM365.Common.psm1") -Force -ErrorAc
 
 Connect-SecureM365Teams `
     -TenantId $TenantId `
-    -UseDeviceAuthentication:$UseDeviceAuthentication |
+    -UseDeviceAuthentication:$UseDeviceAuthentication `
+    -ApplicationId $TeamsApplicationId `
+    -CertificateThumbprint $TeamsCertificateThumbprint `
+    -CertificatePath $TeamsCertificatePath `
+    -CertificatePassword $TeamsCertificatePassword |
     Out-Null
 
 $selection = if ($PSCmdlet.ParameterSetName -eq "SelectedPolicies") {

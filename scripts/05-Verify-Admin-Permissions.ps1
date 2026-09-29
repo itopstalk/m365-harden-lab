@@ -70,6 +70,17 @@ when -UseGraphBrowserPkce is selected. Use only in a PowerShell host where the
 Teams sign-in UI is visible. This does not override the Security Defaults guard
 against Teams device authentication.
 
+.PARAMETER TeamsApplicationId
+Use the dedicated certificate-authenticated Teams application. Application
+authentication is attempted in browser-PKCE mode without AttemptTeamsConnection
+because it does not display a Teams sign-in prompt.
+
+.PARAMETER TeamsCertificateThumbprint
+Thumbprint in Cert:\CurrentUser\My for the Teams application certificate.
+
+.PARAMETER TeamsCertificatePath
+Path to a PFX outside this repository.
+
 .EXAMPLE
 .\05-Verify-Admin-Permissions.ps1 -TenantId $TenantId -CheckOnly
 
@@ -106,11 +117,20 @@ param(
     [switch] $UseGraphDeviceCode,
     [switch] $UseGraphBrowserPkce,
     [switch] $UseTeamsDeviceAuthentication,
-    [switch] $AttemptTeamsConnection
+    [switch] $AttemptTeamsConnection,
+    [guid] $TeamsApplicationId,
+    [string] $TeamsCertificateThumbprint,
+    [string] $TeamsCertificatePath,
+    [securestring] $TeamsCertificatePassword
 )
 
 $ErrorActionPreference = "Stop"
 Import-Module (Join-Path $PSScriptRoot "SecureM365.Common.psm1") -Force -ErrorAction Stop
+$teamsApplicationAuthRequested =
+    ($null -ne $TeamsApplicationId -and $TeamsApplicationId -ne [guid]::Empty) -or
+    -not [string]::IsNullOrWhiteSpace($TeamsCertificateThumbprint) -or
+    -not [string]::IsNullOrWhiteSpace($TeamsCertificatePath) -or
+    $null -ne $TeamsCertificatePassword
 
 $roleTemplates = @{
     "Global Administrator"                = "62e90394-69f5-4237-9190-012177145e10"
@@ -511,7 +531,7 @@ if (-not $blockedReason) {
 
     $teamsPreflight = $null
     try {
-        $teamsPreflight = Get-SecureM365TeamsProvisioningStatus
+        $teamsPreflight = Get-SecureM365TeamsProvisioningStatus -TenantOnly:$teamsApplicationAuthRequested
     }
     catch {
         $teamsPreflight = [pscustomobject]@{
@@ -542,9 +562,11 @@ if (-not $blockedReason) {
     $teamsCode = "TEAMS_CONNECTION_NOT_ATTEMPTED"
     $teamsDetails = "Teams licensing is present, but delegated meeting-policy access was not validated."
     if ($teamsPreflight.Status -eq "PASSED") {
-        $blockCopilotConnection = $UseGraphBrowserPkce -and -not $AttemptTeamsConnection
+        $blockCopilotConnection =
+            $UseGraphBrowserPkce -and -not $AttemptTeamsConnection -and -not $teamsApplicationAuthRequested
         $blockDeviceForSecurityDefaults =
-            $UseGraphBrowserPkce -and $UseTeamsDeviceAuthentication -and $securityDefaultsEnabled -eq $true
+            $UseGraphBrowserPkce -and $UseTeamsDeviceAuthentication -and
+            -not $teamsApplicationAuthRequested -and $securityDefaultsEnabled -eq $true
         if ($blockDeviceForSecurityDefaults) {
             $teamsCode = "TEAMS_DEVICE_AUTH_BLOCKED_BY_SECURITY_DEFAULTS"
             $teamsDetails = "Security Defaults is enabled. Teams device authentication is not attempted in Copilot mode because Entra can block the MS Teams PowerShell Cmdlets app (530035). Validate delegated Teams access from a normal WAM-capable PowerShell host, or separately review certificate-based app authentication. Do not disable Security Defaults merely for this check."
@@ -561,22 +583,35 @@ if (-not $blockedReason) {
         else {
             $teamsStatus = "PASSED"
             $teamsCode = "TEAMS_MEETING_POLICY_ACCESS_VERIFIED"
-            $teamsDetails = "Meeting-policy read access verified using the same account as Microsoft Graph."
+            $teamsDetails = if ($teamsApplicationAuthRequested) {
+                "Meeting-policy read access verified using the dedicated Teams application."
+            }
+            else {
+                "Meeting-policy read access verified using the same account as Microsoft Graph."
+            }
             try {
                 if (-not ($modules | Where-Object Module -eq "MicrosoftTeams").Installed) {
                     throw "MicrosoftTeams is not installed. Run script 00."
                 }
-                $connection = Connect-SecureM365Teams -TenantId $TenantId -UseDeviceAuthentication:$UseTeamsDeviceAuthentication
-                if ([string]::IsNullOrWhiteSpace([string] $connection.Account)) {
-                    throw "Teams did not return the signed-in account; its identity cannot be verified."
-                }
-                if ([string] $connection.Account -ne $admin.userPrincipalName) {
-                    $teamsAccount = [uri]::EscapeDataString([string] $connection.Account)
-                    $teamsUser = Invoke-MgGraphRequest -Method GET `
-                        -Uri "https://graph.microsoft.com/v1.0/users/$teamsAccount`?`$select=id" -ErrorAction Stop
-                    if ($teamsUser.id -ne $admin.id) {
-                        Disconnect-MicrosoftTeams -ErrorAction Stop | Out-Null
-                        throw "Teams signed in as a different account. Reconnect Teams as '$($admin.userPrincipalName)'."
+                $connection = Connect-SecureM365Teams `
+                    -TenantId $TenantId `
+                    -UseDeviceAuthentication:$UseTeamsDeviceAuthentication `
+                    -ApplicationId $TeamsApplicationId `
+                    -CertificateThumbprint $TeamsCertificateThumbprint `
+                    -CertificatePath $TeamsCertificatePath `
+                    -CertificatePassword $TeamsCertificatePassword
+                if (-not $teamsApplicationAuthRequested) {
+                    if ([string]::IsNullOrWhiteSpace([string] $connection.Account)) {
+                        throw "Teams did not return the signed-in account; its identity cannot be verified."
+                    }
+                    if ([string] $connection.Account -ne $admin.userPrincipalName) {
+                        $teamsAccount = [uri]::EscapeDataString([string] $connection.Account)
+                        $teamsUser = Invoke-MgGraphRequest -Method GET `
+                            -Uri "https://graph.microsoft.com/v1.0/users/$teamsAccount`?`$select=id" -ErrorAction Stop
+                        if ($teamsUser.id -ne $admin.id) {
+                            Disconnect-MicrosoftTeams -ErrorAction Stop | Out-Null
+                            throw "Teams signed in as a different account. Reconnect Teams as '$($admin.userPrincipalName)'."
+                        }
                     }
                 }
                 $policies = @(Get-CsTeamsMeetingPolicy -ErrorAction Stop)

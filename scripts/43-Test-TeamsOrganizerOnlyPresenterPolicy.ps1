@@ -7,7 +7,11 @@ param(
     [guid] $TenantId,
 
     [switch] $UseGraphDeviceCode,
-    [switch] $UseTeamsDeviceAuthentication
+    [switch] $UseTeamsDeviceAuthentication,
+    [guid] $TeamsApplicationId,
+    [string] $TeamsCertificateThumbprint,
+    [string] $TeamsCertificatePath,
+    [securestring] $TeamsCertificatePassword
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,7 +23,11 @@ Connect-SecureM365Graph `
     Out-Null
 Connect-SecureM365Teams `
     -TenantId $TenantId `
-    -UseDeviceAuthentication:$UseTeamsDeviceAuthentication |
+    -UseDeviceAuthentication:$UseTeamsDeviceAuthentication `
+    -ApplicationId $TeamsApplicationId `
+    -CertificateThumbprint $TeamsCertificateThumbprint `
+    -CertificatePath $TeamsCertificatePath `
+    -CertificatePassword $TeamsCertificatePassword |
     Out-Null
 
 $nonCompliantPolicies = @(

@@ -54,6 +54,15 @@ Use device-code authentication for Microsoft Graph.
 .PARAMETER UseTeamsDeviceAuthentication
 Use device authentication for Microsoft Teams.
 
+.PARAMETER TeamsApplicationId
+Use the dedicated Teams application with exactly one certificate parameter.
+
+.PARAMETER TeamsCertificateThumbprint
+Thumbprint in Cert:\CurrentUser\My for the Teams application certificate.
+
+.PARAMETER TeamsCertificatePath
+Path to a PFX outside this repository.
+
 .PARAMETER PassThru
 Also return the 11 structured result objects for filtering or export.
 
@@ -91,6 +100,10 @@ param(
     [Alias("UseDeviceCode")]
     [switch] $UseGraphDeviceCode,
     [switch] $UseTeamsDeviceAuthentication,
+    [guid] $TeamsApplicationId,
+    [string] $TeamsCertificateThumbprint,
+    [string] $TeamsCertificatePath,
+    [securestring] $TeamsCertificatePassword,
     [switch] $PassThru
 )
 
@@ -525,7 +538,11 @@ $readers = [ordered]@{
     }
     Teams = {
         Connect-SecureM365Teams -TenantId $TenantId -ValidateMeetingPolicyAccess `
-            -UseDeviceAuthentication:$UseTeamsDeviceAuthentication | Out-Null
+            -UseDeviceAuthentication:$UseTeamsDeviceAuthentication `
+            -ApplicationId $TeamsApplicationId `
+            -CertificateThumbprint $TeamsCertificateThumbprint `
+            -CertificatePath $TeamsCertificatePath `
+            -CertificatePassword $TeamsCertificatePassword | Out-Null
         Get-CsTeamsMeetingPolicy -ErrorAction Stop
     }
 }

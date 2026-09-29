@@ -34,6 +34,17 @@ Communications Administrator. Graph consent does not grant Teams permissions.
 If using PIM, activate the role and allow it to propagate, then disconnect Teams
 and rerun this script to refresh the session.
 
+.PARAMETER TeamsApplicationId
+Use the dedicated Teams application instead of delegated Teams authentication.
+Requires exactly one of TeamsCertificateThumbprint or TeamsCertificatePath.
+
+.PARAMETER TeamsCertificateThumbprint
+Thumbprint in Cert:\CurrentUser\My for the Teams application certificate.
+
+.PARAMETER TeamsCertificatePath
+Path to a PFX outside this repository. Use only when the private key was
+deliberately deployed to this Windows profile or machine.
+
 .EXAMPLE
 .\01-Test-TenantConnections.ps1 -TenantId $TenantId -IncludeTeams
 
@@ -51,7 +62,11 @@ param(
     [switch] $IncludeTeams,
     [switch] $UseGraphDeviceCode,
     [switch] $UseGraphBrowserPkce,
-    [switch] $UseTeamsDeviceAuthentication
+    [switch] $UseTeamsDeviceAuthentication,
+    [guid] $TeamsApplicationId,
+    [string] $TeamsCertificateThumbprint,
+    [string] $TeamsCertificatePath,
+    [securestring] $TeamsCertificatePassword
 )
 
 $ErrorActionPreference = "Stop"
@@ -75,7 +90,11 @@ if ($IncludeTeams) {
     $teamsConnection = Connect-SecureM365Teams `
         -TenantId $TenantId `
         -ValidateMeetingPolicyAccess `
-        -UseDeviceAuthentication:$UseTeamsDeviceAuthentication
+        -UseDeviceAuthentication:$UseTeamsDeviceAuthentication `
+        -ApplicationId $TeamsApplicationId `
+        -CertificateThumbprint $TeamsCertificateThumbprint `
+        -CertificatePath $TeamsCertificatePath `
+        -CertificatePassword $TeamsCertificatePassword
 
     $teamsConnection |
         Select-Object Account, Environment, Tenant, TenantId

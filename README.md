@@ -36,8 +36,7 @@ enabled Teams plan. It then reports the meeting-policy check as `BLOCKED` instea
 of starting Teams WAM or device authentication, which may wait without a visible
 prompt. `Ready` remains false until `Get-CsTeamsMeetingPolicy` is actually read.
 Run the check from a normal WAM-capable PowerShell host to validate delegated
-Teams access. Certificate-based app authentication is a separate design that
-must be reviewed independently.
+Teams access, or use the dedicated certificate application described below.
 
 If Security Defaults is enabled, script 05 never attempts Teams device
 authentication from Copilot mode, even when both `-AttemptTeamsConnection` and
@@ -56,6 +55,129 @@ Normal `Connect-MgGraph` interactive authentication and
 times out rather than waiting indefinitely. Local files named `credentials.txt`,
 token files, and `.env` files are ignored by Git; do not put passwords or tokens
 in repository files.
+
+## Unattended Teams certificate authentication
+
+Microsoft Teams PowerShell supports application authentication with an
+application ID, tenant ID, and either a certificate in the current user's
+certificate store or an `X509Certificate2` object. Microsoft's current support
+page says all Teams cmdlets are supported except its explicit exclusion list;
+`Get-CsTeamsMeetingPolicy` and `Set-CsTeamsMeetingPolicy` are not excluded.
+For these `*-Cs` meeting-policy cmdlets, the dedicated application needs:
+
+- Microsoft Graph **application** permission `Organization.Read.All`.
+- The built-in **Teams Communications Administrator** directory role assigned
+  directly to the application's service principal. It is narrower than Teams
+  Administrator and its documented capabilities include managing meeting policies.
+- No **Skype and Teams Tenant Admin API** permission. Microsoft explicitly says
+  that permission is unnecessary and can cause application-authentication failures.
+
+[Script 06](scripts/06-New-TeamsCertificateApplication.ps1) implements that
+baseline. It creates a 3072-bit RSA/SHA-256 certificate in
+`Cert:\CurrentUser\My` with `NonExportable` key policy and a 12-month lifetime by
+default. Only the public certificate is uploaded to Entra; no client secret or
+private key file is created. The stronger local key settings are this lab's
+Windows hardening choice—Teams documentation does not prescribe a special key
+size beyond using a certificate. The setup operator must interactively consent
+to delegated `Application.ReadWrite.All`, `AppRoleAssignment.ReadWrite.All`, and
+`RoleManagement.ReadWrite.Directory`, plus read-only `Organization.Read.All` for
+explicit tenant validation; those permissions are used only to create and
+authorize the dedicated application and are not granted to it.
+
+Preview first, then create:
+
+```powershell
+$TenantId = [guid]'11111111-1111-4111-8111-111111111111'
+.\06-New-TeamsCertificateApplication.ps1 -TenantId $TenantId -WhatIf
+$teamsApp = .\06-New-TeamsCertificateApplication.ps1 -TenantId $TenantId
+$TeamsApplicationId = [guid]$teamsApp.ApplicationId
+$TeamsCertificateThumbprint = $teamsApp.CertificateThumbprint
+```
+
+The setup validates both the Graph context and `/organization` tenant ID, refuses
+an existing application display name or local certificate subject, asks one
+high-impact confirmation, and verifies `Get-CsTeamsMeetingPolicy -Identity Global`
+through the resulting application connection. It never changes a colliding
+identity. If setup fails after a write, its terminating error lists the object
+IDs already created and an exact teardown command; it does not hide or silently
+roll back partial state. Role and consent propagation can delay the final
+connection—review the IDs before deciding whether to wait and retry script 01 or
+revoke the partial setup.
+
+Pass the same non-secret application ID and thumbprint to every new PowerShell
+process. Script 01 verifies tenant and policy access; scripts 40-45 and 99 route
+the same values to `Connect-SecureM365Teams`:
+
+```powershell
+.\01-Test-TenantConnections.ps1 -TenantId $TenantId -IncludeTeams `
+    -TeamsApplicationId $TeamsApplicationId `
+    -TeamsCertificateThumbprint $TeamsCertificateThumbprint
+
+.\40-Set-TeamsInvitedUsersLobbyPolicy.ps1 -TenantId $TenantId -PolicyIdentity Global `
+    -TeamsApplicationId $TeamsApplicationId `
+    -TeamsCertificateThumbprint $TeamsCertificateThumbprint
+
+.\99-Test-M365RecommendationStatus.ps1 -TenantId $TenantId `
+    -TeamsApplicationId $TeamsApplicationId `
+    -TeamsCertificateThumbprint $TeamsCertificateThumbprint
+```
+
+Certificate authentication removes the Teams sign-in prompt across processes,
+but it does **not** make the private key portable. The default non-exportable key
+is bound to the Windows user profile and machine where script 06 created it.
+Tasks running as another user, on another machine, or in a non-interactive
+service account cannot use that thumbprint. Deliberate deployment elsewhere must
+use an approved certificate lifecycle: place a PFX outside the repository, pass
+its path with `-TeamsCertificatePath`, and supply any password as a runtime
+`SecureString` through `-TeamsCertificatePassword`. The module loads file-based
+keys ephemerally and rejects PFX paths inside this repository. Never commit a
+PFX, password, private key, token, or exported certificate bundle.
+
+Delegated interactive and device authentication remain unchanged when no
+application/certificate parameter is supplied. If any application-authentication
+parameter is supplied, the module requires a nonempty application ID and exactly
+one thumbprint or PFX path; invalid or incomplete application authentication
+fails before `Connect-MicrosoftTeams` and never falls back to delegated sign-in.
+The returned Teams tenant ID must exactly match `-TenantId`, and scripts 01, 05,
+and 99 validate meeting-policy reads.
+
+For rotation in this lab, create a separately named application/certificate,
+verify it with script 01, update scheduled commands to the new application ID
+and thumbprint, then revoke the old identity. Script 06 deliberately refuses to
+mutate an existing application, so it cannot accidentally replace a live
+credential. Preview revocation and then remove cloud grants/objects; include the
+switch only when the exact local certificate should also be deleted:
+
+```powershell
+.\07-Remove-TeamsCertificateApplication.ps1 -TenantId $TenantId `
+    -ApplicationId $TeamsApplicationId -WhatIf
+
+.\07-Remove-TeamsCertificateApplication.ps1 -TenantId $TenantId `
+    -ApplicationId $TeamsApplicationId `
+    -CertificateThumbprint $TeamsCertificateThumbprint `
+    -RemoveLocalCertificate
+```
+
+Troubleshooting:
+
+- **Forbidden/Access Denied:** confirm `Organization.Read.All` has admin consent
+  and Teams Communications Administrator is assigned directly to the service
+  principal, then allow role/consent propagation and reconnect.
+- **Certificate not found/private key unavailable:** run under the Windows user
+  that created the certificate and inspect
+  `Cert:\CurrentUser\My\<thumbprint>`. A public `.cer` file is insufficient.
+- **Wrong tenant:** use the application's home tenant GUID. The scripts disconnect
+  and stop rather than accepting a connection to another tenant.
+- **PFX rejected:** keep it outside the repository, supply its password as a
+  `SecureString`, and confirm the file contains an accessible private key.
+
+Official Microsoft sources:
+
+- [Application-based authentication in Teams PowerShell](https://learn.microsoft.com/microsoftteams/teams-powershell-application-authentication)
+- [`Connect-MicrosoftTeams`](https://learn.microsoft.com/powershell/module/microsoftteams/connect-microsoftteams)
+- [`Get-CsTeamsMeetingPolicy`](https://learn.microsoft.com/powershell/module/microsoftteams/get-csteamsmeetingpolicy)
+- [`Set-CsTeamsMeetingPolicy`](https://learn.microsoft.com/powershell/module/microsoftteams/set-csteamsmeetingpolicy)
+- [Teams administrator roles and capabilities](https://learn.microsoft.com/microsoftteams/using-admin-roles)
 
 ## Verify the lab administrator
 

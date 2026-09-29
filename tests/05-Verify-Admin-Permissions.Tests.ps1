@@ -63,7 +63,13 @@ function Get-Module {
 function Disconnect-MgGraph { [CmdletBinding()] param() throw "Unmocked Graph disconnect." }
 function Connect-MicrosoftTeams {
     [CmdletBinding()]
-    param([string] $TenantId, [switch] $UseDeviceAuthentication)
+    param(
+        [string] $TenantId,
+        [switch] $UseDeviceAuthentication,
+        [string] $ApplicationId,
+        [string] $CertificateThumbprint,
+        [Security.Cryptography.X509Certificates.X509Certificate2] $Certificate
+    )
     throw "Unmocked Teams connection."
 }
 function Disconnect-MicrosoftTeams { [CmdletBinding()] param() throw "Unmocked Teams disconnect." }
@@ -91,12 +97,17 @@ function Invoke-Checker {
         [switch] $WhatIf,
         [switch] $UseGraphBrowserPkce,
         [switch] $AttemptTeamsConnection,
-        [switch] $UseTeamsDeviceAuthentication
+        [switch] $UseTeamsDeviceAuthentication,
+        [guid] $TeamsApplicationId = [guid]::Empty,
+        [string] $TeamsCertificateThumbprint
     )
     & $script:checker -TenantId ([guid] $script:fixture.TenantId) -CheckOnly:$CheckOnly `
         -WhatIf:$WhatIf -UseGraphBrowserPkce:$UseGraphBrowserPkce `
         -AttemptTeamsConnection:$AttemptTeamsConnection `
-        -UseTeamsDeviceAuthentication:$UseTeamsDeviceAuthentication -Confirm:$false 6> $null
+        -UseTeamsDeviceAuthentication:$UseTeamsDeviceAuthentication `
+        -TeamsApplicationId $TeamsApplicationId `
+        -TeamsCertificateThumbprint $TeamsCertificateThumbprint `
+        -Confirm:$false 6> $null
 }
 
 Describe "05 administrator permission verification (offline)" {
@@ -122,6 +133,8 @@ Describe "05 administrator permission verification (offline)" {
             RoleReads = 0
             TeamsReads = 0
             TeamsConnects = 0
+            TeamsApplicationId = $null
+            TeamsCertificateThumbprint = $null
             GraphDisconnects = 0
             TeamsDisconnects = 0
             FailPostNumber = 0
@@ -175,8 +188,10 @@ Describe "05 administrator permission verification (offline)" {
         Mock Write-Warning { param($Message) [void] $script:fixture.Warnings.Add($Message) }
         Mock Out-Host {}
         Mock Connect-MicrosoftTeams {
-            param($TenantId, $UseDeviceAuthentication)
+            param($TenantId, $UseDeviceAuthentication, $ApplicationId, $CertificateThumbprint, $Certificate)
             $script:fixture.TeamsConnects++
+            $script:fixture.TeamsApplicationId = [string] $ApplicationId
+            $script:fixture.TeamsCertificateThumbprint = [string] $CertificateThumbprint
             [pscustomobject]@{ TenantId = $TenantId; Account = $script:fixture.TeamsAccount }
         }
         Mock Disconnect-MicrosoftTeams { $script:fixture.TeamsDisconnects++ }
@@ -673,6 +688,27 @@ Describe "05 administrator permission verification (offline)" {
             Should Be "PASSED"
         $script:fixture.TeamsConnects | Should Be 1
         $script:fixture.TeamsReads | Should Be 1
+    }
+
+    It "uses application authentication without a Teams prompt or user Teams license" {
+        Add-FixtureRole "Global Administrator"
+        $script:fixture.UserTeamsLicensed = $false
+        $appId = "55555555-5555-4555-8555-555555555555"
+        $thumbprint = "0123456789ABCDEF0123456789ABCDEF01234567"
+
+        $result = Invoke-Checker `
+            -UseGraphBrowserPkce `
+            -TeamsApplicationId $appId `
+            -TeamsCertificateThumbprint $thumbprint
+
+        $result.Ready | Should Be $true
+        $preflight = $result.AccessChecks | Where-Object Service -eq "Teams licensing and provisioning"
+        $preflight.Code | Should Be "TEAMS_TENANT_LICENSED_AND_PROVISIONED"
+        ($result.AccessChecks | Where-Object Service -eq "Teams meeting policies").Status |
+            Should Be "PASSED"
+        $script:fixture.TeamsConnects | Should Be 1
+        $script:fixture.TeamsApplicationId | Should Be $appId
+        $script:fixture.TeamsCertificateThumbprint | Should Be $thumbprint
     }
 
     It "never attempts Teams device authentication in Copilot mode when Security Defaults is enabled" {

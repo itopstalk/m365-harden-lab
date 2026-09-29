@@ -5,3 +5,7 @@ credentials.txt
 *.tokens
 .env
 .env.*
+*.pfx
+*.p12
+*.pem
+*.key

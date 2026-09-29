@@ -431,18 +431,95 @@ function Connect-SecureM365Teams {
         [guid] $TenantId,
 
         [switch] $UseDeviceAuthentication,
-        [switch] $ValidateMeetingPolicyAccess
+        [switch] $ValidateMeetingPolicyAccess,
+
+        [Nullable[guid]] $ApplicationId,
+        [string] $CertificateThumbprint,
+        [string] $CertificatePath,
+        [securestring] $CertificatePassword
     )
+
+    $applicationAuthenticationRequested =
+        ($null -ne $ApplicationId -and $ApplicationId -ne [guid]::Empty) -or
+        -not [string]::IsNullOrWhiteSpace($CertificateThumbprint) -or
+        -not [string]::IsNullOrWhiteSpace($CertificatePath) -or
+        $null -ne $CertificatePassword
+    if ($applicationAuthenticationRequested) {
+        if ($null -eq $ApplicationId -or $ApplicationId -eq [guid]::Empty) {
+            throw "ApplicationId is required when certificate-based Teams authentication is requested."
+        }
+        if ($UseDeviceAuthentication) {
+            throw "UseDeviceAuthentication cannot be combined with certificate-based Teams authentication."
+        }
+        if (
+            [string]::IsNullOrWhiteSpace($CertificateThumbprint) -eq
+            [string]::IsNullOrWhiteSpace($CertificatePath)
+        ) {
+            throw "Specify exactly one of CertificateThumbprint or CertificatePath for certificate-based Teams authentication."
+        }
+        if ($null -ne $CertificatePassword -and [string]::IsNullOrWhiteSpace($CertificatePath)) {
+            throw "CertificatePassword can be used only with CertificatePath."
+        }
+    }
 
     $connectParameters = @{
         TenantId    = $TenantId.Guid
         ErrorAction = "Stop"
     }
-    if ($UseDeviceAuthentication) {
+    $certificate = $null
+    if ($applicationAuthenticationRequested) {
+        $connectParameters.ApplicationId = $ApplicationId.Guid
+        if (-not [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
+            $normalizedThumbprint = $CertificateThumbprint -replace '\s', ''
+            if ($normalizedThumbprint -notmatch '^[0-9A-Fa-f]{40,128}$') {
+                throw "CertificateThumbprint must contain only hexadecimal characters."
+            }
+            $connectParameters.CertificateThumbprint = $normalizedThumbprint
+        }
+        else {
+            $resolvedPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($CertificatePath)
+            if (-not (Test-Path -LiteralPath $resolvedPath -PathType Leaf)) {
+                throw "CertificatePath '$CertificatePath' does not exist."
+            }
+            $repositoryRoot = [IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))
+            $fullCertificatePath = [IO.Path]::GetFullPath($resolvedPath)
+            if ($fullCertificatePath.StartsWith(
+                $repositoryRoot + [IO.Path]::DirectorySeparatorChar,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+                throw "CertificatePath must be outside the repository because a PFX contains private key material."
+            }
+            $flags = [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+            $certificate = if ($null -eq $CertificatePassword) {
+                [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                    $fullCertificatePath, [string]::Empty, $flags
+                )
+            }
+            else {
+                [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                    $fullCertificatePath, $CertificatePassword, $flags
+                )
+            }
+            if (-not $certificate.HasPrivateKey) {
+                $certificate.Dispose()
+                throw "CertificatePath '$CertificatePath' does not contain an accessible private key."
+            }
+            $connectParameters.Certificate = $certificate
+        }
+    }
+    elseif ($UseDeviceAuthentication) {
         $connectParameters.UseDeviceAuthentication = $true
     }
 
-    $connection = Connect-MicrosoftTeams @connectParameters
+    try {
+        $connection = Connect-MicrosoftTeams @connectParameters
+    }
+    catch {
+        if ($null -ne $certificate) {
+            $certificate.Dispose()
+        }
+        throw
+    }
     if ([string] $connection.TenantId -ne $TenantId.Guid) {
         Disconnect-MicrosoftTeams -ErrorAction SilentlyContinue
         throw "Microsoft Teams connected to tenant '$($connection.TenantId)' instead of '$($TenantId.Guid)'."
@@ -462,8 +539,9 @@ function Connect-SecureM365Teams {
             }
             throw [System.InvalidOperationException]::new(
                 "Microsoft Teams connected to tenant '$($TenantId.Guid)', but reading the Global meeting policy failed. " +
-                "For Forbidden/Access Denied, verify the Teams account has an active role permitted to read meeting policies " +
-                "(for example, Teams Communications Administrator). Activate PIM if needed and allow role changes to propagate, " +
+                "For Forbidden/Access Denied, verify the Teams identity has an active role permitted to read meeting policies " +
+                "(for example, Teams Communications Administrator). For application authentication, assign the role directly to " +
+                "the service principal and grant only Microsoft Graph Organization.Read.All. Activate PIM for delegated use if needed and allow changes to propagate, " +
                 "then run Disconnect-MicrosoftTeams and rerun script 01 with -IncludeTeams. Graph consent does not grant Teams permissions. " +
                 "Original error: $details",
                 $_.Exception
@@ -486,7 +564,7 @@ function Test-SecureM365CoreTeamsServicePlanName {
 
 function Get-SecureM365TeamsProvisioningStatus {
     [CmdletBinding()]
-    param()
+    param([switch] $TenantOnly)
 
     $skus = @(Get-SecureM365GraphCollection `
         -Uri 'https://graph.microsoft.com/v1.0/subscribedSkus?$select=skuId,skuPartNumber,capabilityStatus,servicePlans')
@@ -554,6 +632,17 @@ function Get-SecureM365TeamsProvisioningStatus {
             Details = "The tenant has Microsoft Teams service plans, but none are provisioned successfully."
             TenantTeamsPlanCount = $tenantTeamsPlans.Count
             TenantReadyPlanCount = 0
+            UserTeamsPlanCount = 0
+            UserReadyPlanCount = 0
+        }
+    }
+    if ($TenantOnly) {
+        return [pscustomobject]@{
+            Status = "PASSED"
+            Code = "TEAMS_TENANT_LICENSED_AND_PROVISIONED"
+            Details = "Microsoft Teams is licensed and provisioned for the tenant. Application authentication does not require a licensed user identity."
+            TenantTeamsPlanCount = $tenantTeamsPlans.Count
+            TenantReadyPlanCount = $enabledTenantTeamsPlans.Count
             UserTeamsPlanCount = 0
             UserReadyPlanCount = 0
         }
