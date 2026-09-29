@@ -28,7 +28,11 @@ $common = [System.Management.Automation.Language.Parser]::ParseFile(
 foreach ($statement in $common.EndBlock.Statements) {
     if (
         $statement -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-        $statement.Name -in @("Connect-SecureM365Graph", "Connect-SecureM365Teams", "Get-SecureM365GraphCollection")
+        $statement.Name -in @(
+            "Connect-SecureM365Graph", "Connect-SecureM365Teams", "Get-SecureM365GraphCollection",
+            "Test-SecureM365TeamsServicePlanName", "Test-SecureM365CoreTeamsServicePlanName",
+            "Get-SecureM365TeamsProvisioningStatus"
+        )
     ) {
         . ([scriptblock]::Create($statement.Extent.Text))
     }
@@ -36,8 +40,19 @@ foreach ($statement in $common.EndBlock.Statements) {
 
 function Connect-MgGraph {
     [CmdletBinding()]
-    param([string] $TenantId, [string[]] $Scopes, [string] $ContextScope, [switch] $NoWelcome, [switch] $UseDeviceCode)
+    param(
+        [string] $TenantId, [string[]] $Scopes, [string] $ContextScope,
+        [switch] $NoWelcome, [switch] $UseDeviceCode, [securestring] $AccessToken
+    )
     throw "Unmocked Graph connection."
+}
+function Invoke-SecureM365BrowserPkce {
+    param([guid] $TenantId, [string[]] $Scopes)
+    [pscustomobject]@{
+        AccessToken = "opaque-fixture-token"
+        Scopes = @($Scopes)
+        TenantId = $TenantId.Guid
+    }
 }
 function Get-MgContext { throw "Unmocked Graph context." }
 function Get-Module {
@@ -71,13 +86,22 @@ function Add-FixtureRole {
 }
 
 function Invoke-Checker {
-    param([switch] $CheckOnly, [switch] $WhatIf)
+    param(
+        [switch] $CheckOnly,
+        [switch] $WhatIf,
+        [switch] $UseGraphBrowserPkce,
+        [switch] $AttemptTeamsConnection,
+        [switch] $UseTeamsDeviceAuthentication
+    )
     & $script:checker -TenantId ([guid] $script:fixture.TenantId) -CheckOnly:$CheckOnly `
-        -WhatIf:$WhatIf -Confirm:$false 6> $null
+        -WhatIf:$WhatIf -UseGraphBrowserPkce:$UseGraphBrowserPkce `
+        -AttemptTeamsConnection:$AttemptTeamsConnection `
+        -UseTeamsDeviceAuthentication:$UseTeamsDeviceAuthentication -Confirm:$false 6> $null
 }
 
 Describe "05 administrator permission verification (offline)" {
     BeforeEach {
+        Remove-Variable SecureM365GraphContextMetadata -Scope Global -ErrorAction SilentlyContinue
         $script:fixture = @{
             TenantId = "11111111-1111-4111-8111-111111111111"
             UserId = "22222222-2222-4222-8222-222222222222"
@@ -97,6 +121,7 @@ Describe "05 administrator permission verification (offline)" {
             PostCount = 0
             RoleReads = 0
             TeamsReads = 0
+            TeamsConnects = 0
             GraphDisconnects = 0
             TeamsDisconnects = 0
             FailPostNumber = 0
@@ -108,6 +133,12 @@ Describe "05 administrator permission verification (offline)" {
             Environment = "Global"
             AccountEnabled = $true
             TeamsDenied = $false
+            SecurityDefaultsEnabled = $true
+            TenantTeamsPresent = $true
+            TenantTeamsProvisioningStatus = "Success"
+            UserTeamsLicensed = $true
+            UserTeamsProvisioningStatus = "Success"
+            UserTeamsCapabilityStatus = "Enabled"
             MissingModule = $null
             WrongPostPrincipal = $false
             WrongReadBack = $false
@@ -118,16 +149,16 @@ Describe "05 administrator permission verification (offline)" {
             FailSecondRolePage = $false
         }
         Mock Connect-MgGraph {
-            param($TenantId, $Scopes, $ContextScope, $NoWelcome, $UseDeviceCode)
+            param($TenantId, $Scopes, $ContextScope, $NoWelcome, $UseDeviceCode, $AccessToken)
             [void] $script:fixture.Connects.Add(@{ Scopes = @($Scopes); DeviceCode = [bool] $UseDeviceCode })
             if ($script:fixture.FailConsent -and $script:fixture.Connects.Count -gt 1) {
                 throw "Admin consent denied."
             }
             $script:fixture.Context = [pscustomobject]@{
-                TenantId = if ($script:fixture.WrongTenant) { $script:fixture.OtherUserId } else { $TenantId }
-                Scopes = @(@($Scopes) + $script:fixture.ExistingScopes | Sort-Object -Unique)
+                TenantId = if ($AccessToken) { "" } elseif ($script:fixture.WrongTenant) { $script:fixture.OtherUserId } else { $TenantId }
+                Scopes = if ($AccessToken) { @() } else { @(@($Scopes) + $script:fixture.ExistingScopes | Sort-Object -Unique) }
                 Account = $script:fixture.Upn
-                AuthType = $script:fixture.AuthType
+                AuthType = if ($AccessToken) { "UserProvidedAccessToken" } else { $script:fixture.AuthType }
                 Environment = $script:fixture.Environment
                 ContextScope = $ContextScope
             }
@@ -145,6 +176,7 @@ Describe "05 administrator permission verification (offline)" {
         Mock Out-Host {}
         Mock Connect-MicrosoftTeams {
             param($TenantId, $UseDeviceAuthentication)
+            $script:fixture.TeamsConnects++
             [pscustomobject]@{ TenantId = $TenantId; Account = $script:fixture.TeamsAccount }
         }
         Mock Disconnect-MicrosoftTeams { $script:fixture.TeamsDisconnects++ }
@@ -203,7 +235,19 @@ Describe "05 administrator permission verification (offline)" {
                     $id = if ($script:fixture.ChangeAccount -and $script:fixture.Connects.Count -gt 1) {
                         $script:fixture.OtherUserId
                     } else { $script:fixture.UserId }
-                    return @{ id = $id; userPrincipalName = $script:fixture.Upn; accountEnabled = $script:fixture.AccountEnabled }
+                    $assignedPlans = @(if ($script:fixture.UserTeamsLicensed) {
+                        @{
+                            servicePlanId = "11111111-1111-4111-8111-111111111110"
+                            service = "TEAMS1"
+                            capabilityStatus = $script:fixture.UserTeamsCapabilityStatus
+                        }
+                    })
+                    return @{
+                        id = $id
+                        userPrincipalName = $script:fixture.Upn
+                        accountEnabled = $script:fixture.AccountEnabled
+                        assignedPlans = $assignedPlans
+                    }
                 }
                 "/v1.0/me/memberOf" { $items = @($script:fixture.Memberships) }
                 "/v1.0/roleManagement/directory/roleDefinitions" { $items = @($script:fixture.Definitions) }
@@ -220,7 +264,44 @@ Describe "05 administrator permission verification (offline)" {
                     }
                     $items = @($script:fixture.Assignments)
                 }
-                "/v1.0/policies/identitySecurityDefaultsEnforcementPolicy" { return @{ isEnabled = $true } }
+                "/v1.0/policies/identitySecurityDefaultsEnforcementPolicy" {
+                    return @{ isEnabled = $script:fixture.SecurityDefaultsEnabled }
+                }
+                "/v1.0/subscribedSkus" {
+                    $servicePlans = @(if ($script:fixture.TenantTeamsPresent) {
+                        @{
+                            servicePlanId = "11111111-1111-4111-8111-111111111110"
+                            servicePlanName = "TEAMS1"
+                            provisioningStatus = $script:fixture.TenantTeamsProvisioningStatus
+                        }
+                    } else {
+                        @{
+                            servicePlanId = "44444444-4444-4444-8444-444444444444"
+                            servicePlanName = "EXCHANGE_S_STANDARD"
+                            provisioningStatus = "Success"
+                        }
+                    })
+                    return @{ value = @(@{
+                        skuId = "55555555-5555-4555-8555-555555555555"
+                        skuPartNumber = "Microsoft_Teams_Enterprise_New"
+                        capabilityStatus = "Enabled"
+                        servicePlans = $servicePlans
+                    }) }
+                }
+                "/v1.0/me/licenseDetails" {
+                    $servicePlans = @(if ($script:fixture.UserTeamsLicensed) {
+                        @{
+                            servicePlanId = "11111111-1111-4111-8111-111111111110"
+                            servicePlanName = "TEAMS1"
+                            provisioningStatus = $script:fixture.UserTeamsProvisioningStatus
+                        }
+                    })
+                    return @{ value = @(@{
+                        skuId = "55555555-5555-4555-8555-555555555555"
+                        skuPartNumber = "Microsoft_Teams_Enterprise_New"
+                        servicePlans = $servicePlans
+                    }) }
+                }
                 "/v1.0/policies/authorizationPolicy" { return @{ id = "authorizationPolicy" } }
                 "/v1.0/identity/conditionalAccess/policies" { return @{ value = @() } }
                 "/v1.0/users" { return @{ value = @(@{ id = $script:fixture.UserId }) } }
@@ -254,7 +335,7 @@ Describe "05 administrator permission verification (offline)" {
             }
         ) | Sort-Object -Unique
         @($scopeValues | Where-Object { $_ -notin $script:allScopes }).Count | Should Be 0
-        $script:allScopes.Count | Should Be 12
+        $script:allScopes.Count | Should Be 13
     }
 
     It "returns an empty membership collection from the fixture" {
@@ -295,7 +376,7 @@ Describe "05 administrator permission verification (offline)" {
         $result.Ready | Should Be $true
         $result.RoleCoverage.Count | Should Be 7
         $result.MissingRoles.Count | Should Be 0
-        $result.AccessChecks.Count | Should Be 9
+        $result.AccessChecks.Count | Should Be 10
         $script:fixture.PostCount | Should Be 0
     }
 
@@ -524,6 +605,86 @@ Describe "05 administrator permission verification (offline)" {
         $result.Ready | Should Be $false
         ($result.AccessChecks | Where-Object Service -eq "Teams meeting policies").Status | Should Be "FAILED"
         $script:fixture.PostCount | Should Be 0
+    }
+
+    It "preflights Teams but blocks interactive validation in Copilot mode with Security Defaults" {
+        Add-FixtureRole "Global Administrator"
+        $result = Invoke-Checker -UseGraphBrowserPkce
+
+        $result.Ready | Should Be $false
+        $preflight = $result.AccessChecks | Where-Object Service -eq "Teams licensing and provisioning"
+        $preflight.Status | Should Be "PASSED"
+        $preflight.Code | Should Be "TEAMS_LICENSED_AND_PROVISIONED"
+        $preflight.TenantReadyPlanCount | Should Be 1
+        $preflight.UserReadyPlanCount | Should Be 1
+        $meeting = $result.AccessChecks | Where-Object Service -eq "Teams meeting policies"
+        $meeting.Status | Should Be "BLOCKED"
+        $meeting.Code | Should Be "TEAMS_INTERACTIVE_VALIDATION_BLOCKED"
+        $meeting.Details | Should Match "normal WAM-capable PowerShell host"
+        $meeting.Details | Should Match "Do not disable Security Defaults"
+        $script:fixture.TeamsConnects | Should Be 0
+        $script:fixture.TeamsReads | Should Be 0
+    }
+
+    It "does not attempt Teams authentication when the tenant has no Teams license" {
+        Add-FixtureRole "Global Administrator"
+        $script:fixture.TenantTeamsPresent = $false
+        $result = Invoke-Checker -UseGraphBrowserPkce
+
+        $result.Ready | Should Be $false
+        $preflight = $result.AccessChecks | Where-Object Service -eq "Teams licensing and provisioning"
+        $preflight.Status | Should Be "FAILED"
+        $preflight.Code | Should Be "TEAMS_TENANT_ABSENT"
+        ($result.AccessChecks | Where-Object Service -eq "Teams meeting policies").Code |
+            Should Be "TEAMS_CONNECTION_BLOCKED_BY_PREFLIGHT"
+        $script:fixture.TeamsConnects | Should Be 0
+    }
+
+    It "reports tenant Teams plans that are present but unavailable" {
+        Add-FixtureRole "Global Administrator"
+        $script:fixture.TenantTeamsProvisioningStatus = "PendingProvisioning"
+        $result = Invoke-Checker -UseGraphBrowserPkce
+
+        $preflight = $result.AccessChecks | Where-Object Service -eq "Teams licensing and provisioning"
+        $preflight.Status | Should Be "FAILED"
+        $preflight.Code | Should Be "TEAMS_TENANT_PLANS_UNAVAILABLE"
+        $preflight.TenantTeamsPlanCount | Should Be 1
+        $script:fixture.TeamsConnects | Should Be 0
+    }
+
+    It "does not attempt Teams authentication when the administrator is unlicensed" {
+        Add-FixtureRole "Global Administrator"
+        $script:fixture.UserTeamsLicensed = $false
+        $result = Invoke-Checker -UseGraphBrowserPkce
+
+        $result.Ready | Should Be $false
+        $preflight = $result.AccessChecks | Where-Object Service -eq "Teams licensing and provisioning"
+        $preflight.Status | Should Be "FAILED"
+        $preflight.Code | Should Be "TEAMS_USER_UNLICENSED_OR_UNPROVISIONED"
+        $script:fixture.TeamsConnects | Should Be 0
+    }
+
+    It "allows an explicit Teams connection attempt after a passing preflight" {
+        Add-FixtureRole "Global Administrator"
+        $result = Invoke-Checker -UseGraphBrowserPkce -AttemptTeamsConnection
+
+        $result.Ready | Should Be $true
+        ($result.AccessChecks | Where-Object Service -eq "Teams meeting policies").Status |
+            Should Be "PASSED"
+        $script:fixture.TeamsConnects | Should Be 1
+        $script:fixture.TeamsReads | Should Be 1
+    }
+
+    It "never attempts Teams device authentication in Copilot mode when Security Defaults is enabled" {
+        Add-FixtureRole "Global Administrator"
+        $result = Invoke-Checker -UseGraphBrowserPkce -AttemptTeamsConnection -UseTeamsDeviceAuthentication
+
+        $result.Ready | Should Be $false
+        $meeting = $result.AccessChecks | Where-Object Service -eq "Teams meeting policies"
+        $meeting.Status | Should Be "BLOCKED"
+        $meeting.Code | Should Be "TEAMS_DEVICE_AUTH_BLOCKED_BY_SECURITY_DEFAULTS"
+        $meeting.Details | Should Match "530035"
+        $script:fixture.TeamsConnects | Should Be 0
     }
 
     It "rejects a different Teams account before reading its policies" {

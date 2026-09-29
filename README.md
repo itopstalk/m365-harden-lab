@@ -30,6 +30,27 @@ same flow in the administrator checker, use:
 .\05-Verify-Admin-Permissions.ps1 -TenantId $TenantId -UseGraphBrowserPkce -CheckOnly
 ```
 
+In Copilot mode, script 05 uses Graph to verify that the tenant has provisioned
+Teams service plans and that the signed-in administrator has a provisioned,
+enabled Teams plan. It then reports the meeting-policy check as `BLOCKED` instead
+of starting Teams WAM or device authentication, which may wait without a visible
+prompt. `Ready` remains false until `Get-CsTeamsMeetingPolicy` is actually read.
+Run the check from a normal WAM-capable PowerShell host to validate delegated
+Teams access. Certificate-based app authentication is a separate design that
+must be reviewed independently.
+
+If Security Defaults is enabled, script 05 never attempts Teams device
+authentication from Copilot mode, even when both `-AttemptTeamsConnection` and
+`-UseTeamsDeviceAuthentication` are supplied. Entra can reject the **MS Teams
+PowerShell Cmdlets** app with error 530035 in that configuration. Do not weaken
+or disable Security Defaults merely to make this check pass. In a suitable host,
+the following explicitly opts into the normal Teams connection attempt after the
+Graph licensing preflight:
+
+```powershell
+.\05-Verify-Admin-Permissions.ps1 -TenantId $TenantId -UseGraphBrowserPkce -AttemptTeamsConnection
+```
+
 Normal `Connect-MgGraph` interactive authentication and
 `-UseGraphDeviceCode` remain available outside managed terminals. Browser PKCE
 times out rather than waiting indefinitely. Local files named `credentials.txt`,
