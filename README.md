@@ -56,6 +56,129 @@ times out rather than waiting indefinitely. Local files named `credentials.txt`,
 token files, and `.env` files are ignored by Git; do not put passwords or tokens
 in repository files.
 
+## Validate Microsoft 365 Baseline Security Mode settings
+
+Scripts 62-69 provide a read-only inventory of the 20 settings currently listed
+on Microsoft's [Baseline Security Mode settings](https://learn.microsoft.com/en-us/microsoft-365/baseline-security-mode/baseline-security-mode-settings?view=o365-worldwide)
+page. They validate supported native tenant controls, not the Baseline Security
+Mode UI toggle, preview/draft state, or impact-report state. Microsoft documents
+no API for those Baseline Security Mode surfaces.
+
+Run the consolidated report from `scripts`:
+
+```powershell
+$report = .\69-Test-BaselineSecurityMode.ps1 -TenantId $TenantId -UseGraphBrowserPkce
+$report
+$report.Results | Format-Table SettingId, Workload, Status, Resolved, ActualValue -Wrap
+$report.Results | Export-Csv .\baseline-security-mode.csv -NoTypeInformation
+```
+
+Exchange uses a separate modern interactive connection. Optionally direct the
+prompt to a specific administrator:
+
+```powershell
+$report = .\69-Test-BaselineSecurityMode.ps1 -TenantId $TenantId `
+    -UseGraphBrowserPkce `
+    -ExchangeUserPrincipalName admin@contoso.onmicrosoft.com
+```
+
+Use `-SkipExchange` when Exchange Online is unavailable. `EXO-001` is then
+returned as `UNKNOWN`; the report never turns a skipped or failed read into a
+success. The workload scripts can also be run separately:
+
+```powershell
+.\62-Test-BaselineAuthenticationAndApps.ps1 -TenantId $TenantId -UseGraphBrowserPkce
+.\63-Test-BaselineSharePointAndOneDrive.ps1
+.\64-Test-BaselineExchangeOnline.ps1 -TenantId $TenantId
+.\65-Test-BaselineMicrosoft365Apps.ps1
+.\66-Test-BaselineTeamsAndCollaboration.ps1
+```
+
+Every result has stable `SettingId`, `Setting`, `Workload`, `Status`,
+`Resolved`, `ActualValue`, `ExpectedValue`, `Evidence`, `SourceUrl`, and
+`CheckedAt` fields. `Status` is `ENABLED`, `DISABLED`, or `UNKNOWN`.
+`Resolved` is Boolean only for a determinable result and is null for `UNKNOWN`.
+Authentication, authorization, service, empty/malformed response, and
+wrong-tenant failures are explicit `UNKNOWN` evidence.
+
+### Complete setting inventory
+
+| ID | Setting | Workload | Validation |
+|---|---|---|---|
+| `AUTH-001` | Protect admin portal access with phishing-resistant MFA | Authentication / Entra | Automated: enabled Conditional Access policy, documented role coverage, Microsoft Admin Portals, phishing-resistant authentication strength |
+| `AUTH-002` | Block legacy authentication flows | Authentication / Entra | Automated: enabled all-user/all-resource block for Exchange ActiveSync and other legacy clients |
+| `ENTRA-APP-001` | Block addition of new password credentials to apps | Authentication / Entra | Automated: Graph `defaultAppManagementPolicy`, `passwordAddition` enabled for applications and service principals |
+| `ENTRA-APP-002` | Restrict end-user consent to certified/single-tenant low-risk apps | Authentication / Entra | Automated: default user role assigned only `microsoft-user-default-low` |
+| `APPS-001` | Block basic authentication | Microsoft 365 Apps | `UNKNOWN`: Baseline Security Mode / Office Cloud Policy Service / Trust Center UI only |
+| `APPS-002` | Block insecure protocols for file opens | Microsoft 365 Apps | `UNKNOWN`: Office Cloud Policy Service UI only |
+| `APPS-003` | Block FrontPage RPC fallback for file opens | Microsoft 365 Apps | `UNKNOWN`: Office Cloud Policy Service UI only |
+| `SPO-001` | Block legacy browser authentication | SharePoint / OneDrive | `UNKNOWN`: RPS was permanently deprecated in October 2025, but Microsoft documents no supported live read property |
+| `SPO-002` | Block legacy client authentication | SharePoint / OneDrive | `UNKNOWN`: `LegacyAuthProtocolsEnabled` is settable, but current `Get-SPOTenant` documentation does not confirm it as output |
+| `SPO-003` | Do not allow new custom scripts | SharePoint / OneDrive | `UNKNOWN`: permanent tenant-wide behavior is BSM UI-only; per-site `DenyAddAndCustomizePages` is not equivalent |
+| `SPO-004` | Disable Microsoft Store access for SharePoint | SharePoint / OneDrive | `UNKNOWN`: `DisableSharePointStoreAccess` is settable, but current `Get-SPOTenant` documentation does not confirm it as output |
+| `EXO-001` | Disable organization-wide EWS access | Exchange Online | Automated: `Get-OrganizationConfig.EwsEnabled` must be explicitly false; null permits EWS |
+| `FILES-001` | Protect ancient legacy formats and disallow editing | Microsoft 365 Apps | `UNKNOWN`: Office Cloud Policy Service / impact report only |
+| `FILES-002` | Protect old legacy formats and allow editing | Microsoft 365 Apps | `UNKNOWN`: Office Cloud Policy Service / impact report only |
+| `FILES-003` | Block ActiveX controls | Microsoft 365 Apps | `UNKNOWN`: Office Cloud Policy Service / impact report only |
+| `FILES-004` | Block OLE Graph and OrgChart objects | Microsoft 365 Apps | `UNKNOWN`: Office Cloud Policy Service UI only |
+| `FILES-005` | Block DDE server launches in Excel | Microsoft 365 Apps | `UNKNOWN`: Office Cloud Policy Service UI only |
+| `FILES-006` | Block Microsoft Publisher | Microsoft 365 Apps | `UNKNOWN`: Office Cloud Policy Service UI only; Publisher is removed from Microsoft 365 in October 2026 |
+| `ROOMS-001` | Restrict Teams Rooms resource-account file access when not in use | Teams / collaboration | `UNKNOWN`: preview `Set-SPOTenant` input, may not exist, and is not documented as readable output |
+| `ROOMS-002` | Allow only endpoint-managed compliant Teams Rooms devices | Teams / collaboration | `UNKNOWN`: requires correlated dynamic group, Conditional Access, Intune, and access-package evidence; no BSM API or stable BSM object identity |
+
+The five automated rows are the complete set for which the linked Microsoft Learn
+documentation provides a supported read surface and a sufficiently authoritative
+mapping. The scripts intentionally do not treat secure Office defaults, a
+settable-only SharePoint parameter, Secure Score, or a similarly named policy as
+proof that a Baseline Security Mode setting is enabled.
+
+### Modules, permissions, roles, and cloud scope
+
+- Run script 00 to install `Microsoft.Graph.Authentication`,
+  `Microsoft.Graph.Identity.SignIns`, and `ExchangeOnlineManagement` in addition
+  to the repository's existing modules.
+- Graph checks request delegated `Policy.Read.All`. Microsoft documents this as
+  the least-privilege read permission for Conditional Access policies,
+  authorization policy, and default app management policy. No new Graph scope
+  was added because the repository already requests `Policy.Read.All`.
+- Conditional Access reads support **Security Reader** or **Global Reader**;
+  Conditional Access Administrator and Security Administrator also work.
+  Reading `defaultAppManagementPolicy` requires **Global Reader** as the
+  least-privileged supported delegated role. Script 05 now checks that role and
+  probes the endpoint.
+- Exchange read access requires Exchange Online RBAC **View-Only Organization
+  Management**. Exchange Administrator is broader and is not automatically
+  required by these read-only scripts. Script 05 verifies the module but cannot
+  safely infer Exchange RBAC role-group membership through Graph.
+- Microsoft 365 Apps manual checks require **Office Apps Administrator** to
+  inspect/manage Office Cloud Policy Service. SharePoint manual checks require
+  **SharePoint Administrator**. The room-device compliant-sign-in workflow
+  requires Conditional Access Administrator and Exchange Online Administrator,
+  plus Entra ID P1, Intune, and Entra ID Governance; Teams Rooms Pro does not
+  include Entra ID Governance.
+- These implementations target the Microsoft 365 worldwide cloud, matching the
+  cited `o365-worldwide` documentation and the common Graph authenticator's
+  explicit `Global` environment validation. Sovereign-cloud endpoint and feature
+  availability are not inferred.
+
+Conditional Access, role, consent, Exchange, and Baseline Security Mode changes
+can require propagation and fresh service tokens. Microsoft documents up to
+24 hours for relevant SharePoint legacy-auth changes. The authentication-method
+registration report's existing 36-hour lag does not affect scripts 62-69 because
+they do not use it. Run Microsoft's impact report before enabling a setting;
+Microsoft recommends enabling only after dependencies are remediated and the
+report shows zero impact.
+
+Authoritative Microsoft sources are linked in each result and in comment-based
+help. Key API references:
+
+- [List Conditional Access policies](https://learn.microsoft.com/en-us/graph/api/conditionalaccessroot-list-policies)
+- [Get the default app management policy](https://learn.microsoft.com/en-us/graph/api/tenantappmanagementpolicy-get)
+- [Configure user consent](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/configure-user-consent)
+- [Control access to EWS](https://learn.microsoft.com/en-us/exchange/client-developer/exchange-web-services/how-to-control-access-to-ews-in-exchange)
+- [`Get-SPOTenant`](https://learn.microsoft.com/en-us/powershell/module/microsoft.online.sharepoint.powershell/get-spotenant)
+- [Block noncompliant Teams Rooms devices](https://learn.microsoft.com/en-us/microsoftteams/rooms/block-non-compliant-teams-rooms-devices)
+
 ## Unattended Teams certificate authentication
 
 Microsoft Teams PowerShell supports application authentication with an

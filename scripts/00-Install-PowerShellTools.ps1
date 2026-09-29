@@ -29,6 +29,7 @@ $requiredModules = @(
     "Microsoft.Graph.Identity.SignIns"
     "Microsoft.Graph.Identity.Governance"
     "MicrosoftTeams"
+    "ExchangeOnlineManagement"
 )
 
 foreach ($moduleName in $requiredModules) {

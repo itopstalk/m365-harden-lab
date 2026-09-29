@@ -183,7 +183,8 @@ Describe "05 administrator permission verification (offline)" {
             if ($Name -ne $script:fixture.MissingModule) { [pscustomobject]@{ Name = $Name } }
         } -ParameterFilter { $ListAvailable -and $Name -in @(
             "Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.SignIns",
-            "Microsoft.Graph.Identity.Governance", "MicrosoftTeams"
+            "Microsoft.Graph.Identity.Governance", "MicrosoftTeams",
+            "ExchangeOnlineManagement"
         ) }
         Mock Write-Warning { param($Message) [void] $script:fixture.Warnings.Add($Message) }
         Mock Out-Host {}
@@ -318,6 +319,7 @@ Describe "05 administrator permission verification (offline)" {
                     }) }
                 }
                 "/v1.0/policies/authorizationPolicy" { return @{ id = "authorizationPolicy" } }
+                "/v1.0/policies/defaultAppManagementPolicy" { return @{ id = "defaultAppManagementPolicy" } }
                 "/v1.0/identity/conditionalAccess/policies" { return @{ value = @() } }
                 "/v1.0/users" { return @{ value = @(@{ id = $script:fixture.UserId }) } }
                 "/v1.0/domains" { return @{ value = @(@{ id = "example.onmicrosoft.com" }) } }
@@ -389,9 +391,9 @@ Describe "05 administrator permission verification (offline)" {
         Add-FixtureRole "Global Administrator"
         $result = Invoke-Checker
         $result.Ready | Should Be $true
-        $result.RoleCoverage.Count | Should Be 7
+        $result.RoleCoverage.Count | Should Be 8
         $result.MissingRoles.Count | Should Be 0
-        $result.AccessChecks.Count | Should Be 10
+        $result.AccessChecks.Count | Should Be 11
         $script:fixture.PostCount | Should Be 0
     }
 
@@ -402,7 +404,7 @@ Describe "05 administrator permission verification (offline)" {
     }
 
     It "recognizes broader existing roles without redundant grants" {
-        foreach ($name in @("Security Administrator", "User Administrator", "Privileged Role Administrator", "Teams Administrator")) {
+        foreach ($name in @("Security Administrator", "User Administrator", "Privileged Role Administrator", "Teams Administrator", "Global Reader")) {
             Add-FixtureRole $name
         }
         $result = Invoke-Checker
@@ -428,7 +430,7 @@ Describe "05 administrator permission verification (offline)" {
         $result = Invoke-Checker
         $result.CanAssignRoles | Should Be $false
         $result.Ready | Should Be $false
-        $result.MissingRoles.Count | Should Be 5
+        $result.MissingRoles.Count | Should Be 6
         ("Privileged Role Administrator" -in $result.MissingRoles) | Should Be $true
         $result.BlockedReason | Should Match "will not switch accounts"
         $result.AccessChecks.Count | Should Be 0
@@ -450,25 +452,26 @@ Describe "05 administrator permission verification (offline)" {
         $script:fixture.PostCount | Should Be 0
     }
 
-    It "creates only four missing dedicated roles and verifies persistence" {
+    It "creates only five missing dedicated roles and verifies persistence" {
         Add-FixtureRole "Privileged Role Administrator"
         $result = Invoke-Checker
-        $result.AssignmentsCreated.Count | Should Be 4
+        $result.AssignmentsCreated.Count | Should Be 5
         ("Authentication Policy Administrator" -in $result.AssignmentsCreated.Role) | Should Be $false
         $result.MissingRoles.Count | Should Be 0
         $result.RequiresReconnect | Should Be $true
         $result.Ready | Should Be $false
-        @($script:fixture.Requests | Where-Object { $_.Method -eq "GET" -and $_.Uri.AbsolutePath -like "*/roleAssignments/created-*" }).Count | Should Be 4
+        @($script:fixture.Requests | Where-Object { $_.Method -eq "GET" -and $_.Uri.AbsolutePath -like "*/roleAssignments/created-*" }).Count | Should Be 5
         $rerun = Invoke-Checker
         $rerun.Ready | Should Be $true
         $rerun.AssignmentsCreated.Count | Should Be 0
-        $script:fixture.PostCount | Should Be 4
+        $script:fixture.PostCount | Should Be 5
     }
 
     It "uses the planned User Administrator grant for both Secure Score and SSPR" {
         foreach ($name in @(
             "Privileged Role Administrator", "Conditional Access Administrator",
-            "Reports Reader", "Teams Communications Administrator", "Authentication Policy Administrator"
+            "Reports Reader", "Teams Communications Administrator", "Authentication Policy Administrator",
+            "Global Reader"
         )) { Add-FixtureRole $name }
         $result = Invoke-Checker
         $result.AssignmentsCreated.Count | Should Be 1
@@ -479,7 +482,7 @@ Describe "05 administrator permission verification (offline)" {
     It "makes no role writes or write-scope requests in CheckOnly mode" {
         Add-FixtureRole "Privileged Role Administrator"
         $result = Invoke-Checker -CheckOnly
-        $result.MissingRoles.Count | Should Be 4
+        $result.MissingRoles.Count | Should Be 5
         $script:fixture.PostCount | Should Be 0
         $script:fixture.Connects.Count | Should Be 1
         @($script:fixture.Connects[0].Scopes | Where-Object { $_ -match "ReadWrite|Create" }).Count | Should Be 0
@@ -491,7 +494,7 @@ Describe "05 administrator permission verification (offline)" {
         $result = Invoke-Checker -WhatIf
         $result.Ready | Should Be $false
         $result.CanAssignRoles | Should Be $true
-        $result.MissingRoles.Count | Should Be 4
+        $result.MissingRoles.Count | Should Be 5
         @($result.GraphPermissions | Where-Object Status -eq "NOT IN TOKEN").Count | Should Be 6
         $result.AssignmentsCreated.Count | Should Be 0
         $script:fixture.PostCount | Should Be 0
@@ -563,7 +566,7 @@ Describe "05 administrator permission verification (offline)" {
         Add-FixtureRole "Global Administrator" -PrincipalId $script:fixture.OtherUserId
         $result = Invoke-Checker
         $result.CanAssignRoles | Should Be $false
-        $result.MissingRoles.Count | Should Be 5
+        $result.MissingRoles.Count | Should Be 6
         $script:fixture.PostCount | Should Be 0
     }
 
@@ -789,7 +792,7 @@ Describe "05 administrator permission verification (offline)" {
         Add-FixtureRole "Privileged Role Administrator"
         $script:fixture.ConcurrentRole = "Conditional Access Administrator"
         $result = Invoke-Checker
-        $result.AssignmentsCreated.Count | Should Be 3
+        $result.AssignmentsCreated.Count | Should Be 4
         $result.MissingRoles.Count | Should Be 0
     }
 }

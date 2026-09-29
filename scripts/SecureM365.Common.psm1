@@ -984,6 +984,241 @@ function Test-SecureM365ScoreAction {
     }
 }
 
+function Get-SecureM365BaselineCatalog {
+    [CmdletBinding()]
+    param()
+
+    @(
+        [pscustomobject]@{
+            SettingId = "AUTH-001"
+            Setting = "Protect admin access to Microsoft admin portals with phishing-resistant authentication"
+            Workload = "Authentication / Microsoft Entra"
+            ExpectedValue = "Enabled Conditional Access policy for the documented privileged roles and Microsoft Admin Portals requiring the phishing-resistant MFA authentication strength"
+            SourceUrl = "https://learn.microsoft.com/en-us/microsoft-365/baseline-security-mode/baseline-security-mode-settings?view=o365-worldwide"
+            Automation = "Graph"
+        }
+        [pscustomobject]@{
+            SettingId = "AUTH-002"
+            Setting = "Block legacy authentication flows"
+            Workload = "Authentication / Microsoft Entra"
+            ExpectedValue = "Enabled Conditional Access block policy for all users and resources covering Exchange ActiveSync and other legacy clients"
+            SourceUrl = "https://learn.microsoft.com/en-us/entra/identity/conditional-access/policy-block-legacy-authentication"
+            Automation = "Graph"
+        }
+        [pscustomobject]@{
+            SettingId = "ENTRA-APP-001"
+            Setting = "Block addition of new password credentials to apps"
+            Workload = "Authentication / Microsoft Entra"
+            ExpectedValue = "passwordAddition restriction enabled for applications and service principals in the default app management policy"
+            SourceUrl = "https://learn.microsoft.com/en-us/graph/api/tenantappmanagementpolicy-get"
+            Automation = "Graph"
+        }
+        [pscustomobject]@{
+            SettingId = "ENTRA-APP-002"
+            Setting = "Restrict end-user consent to Microsoft 365 certified or single-tenant, low-risk apps"
+            Workload = "Authentication / Microsoft Entra"
+            ExpectedValue = "Only managePermissionGrantsForSelf.microsoft-user-default-low is assigned to the default user role"
+            SourceUrl = "https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/configure-user-consent"
+            Automation = "Graph"
+        }
+        [pscustomobject]@{
+            SettingId = "APPS-001"
+            Setting = "Block basic authentication"
+            Workload = "Microsoft 365 Apps"
+            ExpectedValue = "Baseline Security Mode locks Basic authentication prompts off in Office Trust Center"
+            SourceUrl = "https://learn.microsoft.com/en-us/microsoft-365/baseline-security-mode/block-basic-authentication"
+            Automation = "Manual"
+        }
+        [pscustomobject]@{
+            SettingId = "APPS-002"
+            Setting = "Block insecure protocols for file opens"
+            Workload = "Microsoft 365 Apps"
+            ExpectedValue = "Office Cloud Policy Service Block Insecure Protocols policy enforced"
+            SourceUrl = "https://learn.microsoft.com/en-us/microsoft-365/baseline-security-mode/block-insecure-protocols-file-opens"
+            Automation = "Manual"
+        }
+        [pscustomobject]@{
+            SettingId = "APPS-003"
+            Setting = "Block FrontPage RPC protocol for file opens"
+            Workload = "Microsoft 365 Apps"
+            ExpectedValue = "Office Cloud Policy Service Restrict Apps from FPRPC Fallback policy enforced"
+            SourceUrl = "https://learn.microsoft.com/en-us/microsoft-365/baseline-security-mode/block-server-extensions-protocol-file-opens"
+            Automation = "Manual"
+        }
+        [pscustomobject]@{
+            SettingId = "SPO-001"
+            Setting = "Block legacy browser authentication to SharePoint and OneDrive"
+            Workload = "SharePoint / OneDrive"
+            ExpectedValue = "Legacy RPS protocol unavailable; legacy browser authentication was deprecated for enterprise tenants in October 2025"
+            SourceUrl = "https://learn.microsoft.com/en-us/powershell/module/microsoft.online.sharepoint.powershell/set-spotenant"
+            Automation = "Manual"
+        }
+        [pscustomobject]@{
+            SettingId = "SPO-002"
+            Setting = "Block legacy client authentication to SharePoint and OneDrive"
+            Workload = "SharePoint / OneDrive"
+            ExpectedValue = "LegacyAuthProtocolsEnabled = false"
+            SourceUrl = "https://learn.microsoft.com/en-us/powershell/module/microsoft.online.sharepoint.powershell/set-spotenant"
+            Automation = "Manual"
+        }
+        [pscustomobject]@{
+            SettingId = "SPO-003"
+            Setting = "Don't allow new custom scripts in SharePoint sites"
+            Workload = "SharePoint / OneDrive"
+            ExpectedValue = "Baseline Security Mode permanently blocks new custom scripts across SharePoint and OneDrive"
+            SourceUrl = "https://learn.microsoft.com/en-us/sharepoint/allow-or-prevent-custom-script"
+            Automation = "Manual"
+        }
+        [pscustomobject]@{
+            SettingId = "SPO-004"
+            Setting = "Disable access to Microsoft Store for SharePoint"
+            Workload = "SharePoint / OneDrive"
+            ExpectedValue = "DisableSharePointStoreAccess = true"
+            SourceUrl = "https://learn.microsoft.com/en-us/sharepoint/configure-sharepoint-store-settings"
+            Automation = "Manual"
+        }
+        [pscustomobject]@{
+            SettingId = "EXO-001"
+            Setting = "Disable organization-wide access to Exchange Web Services"
+            Workload = "Exchange Online"
+            ExpectedValue = "EwsEnabled = false at the organization level"
+            SourceUrl = "https://learn.microsoft.com/en-us/exchange/client-developer/exchange-web-services/how-to-control-access-to-ews-in-exchange"
+            Automation = "Exchange"
+        }
+        [pscustomobject]@{
+            SettingId = "FILES-001"
+            Setting = "Open ancient legacy formats in Protected View and disallow editing"
+            Workload = "Microsoft 365 Apps"
+            ExpectedValue = "Documented Office Cloud Policy Service file-block policies enforced"
+            SourceUrl = "https://learn.microsoft.com/en-us/microsoft-365/baseline-security-mode/open-ancient-legacy-formats-protected-view-disallow-editing"
+            Automation = "Manual"
+        }
+        [pscustomobject]@{
+            SettingId = "FILES-002"
+            Setting = "Open old legacy formats in Protected View and allow editing"
+            Workload = "Microsoft 365 Apps"
+            ExpectedValue = "Documented Office Cloud Policy Service file-block policies enforced"
+            SourceUrl = "https://learn.microsoft.com/en-us/microsoft-365/baseline-security-mode/open-old-legacy-formats-protected-view-disallow-editing"
+            Automation = "Manual"
+        }
+        [pscustomobject]@{
+            SettingId = "FILES-003"
+            Setting = "Block ActiveX controls"
+            Workload = "Microsoft 365 Apps"
+            ExpectedValue = "Office Cloud Policy Service Disable All ActiveX policy enforced"
+            SourceUrl = "https://learn.microsoft.com/en-us/microsoft-365/baseline-security-mode/block-active-x-controls"
+            Automation = "Manual"
+        }
+        [pscustomobject]@{
+            SettingId = "FILES-004"
+            Setting = "Block OLE Graph and OrgChart objects"
+            Workload = "Microsoft 365 Apps"
+            ExpectedValue = "Office Cloud Policy Service Block OrgChart and Block OLE Graph policies enforced"
+            SourceUrl = "https://learn.microsoft.com/en-us/microsoft-365/baseline-security-mode/block-ole-graph-org-chart-objects"
+            Automation = "Manual"
+        }
+        [pscustomobject]@{
+            SettingId = "FILES-005"
+            Setting = "Block Dynamic Data Exchange server launches in Excel"
+            Workload = "Microsoft 365 Apps"
+            ExpectedValue = "Office Cloud Policy Service Don't allow Dynamic Data Exchange server launch in Excel policy enforced"
+            SourceUrl = "https://learn.microsoft.com/en-us/microsoft-365/baseline-security-mode/block-dynamic-data-exchange-server-launches-excel"
+            Automation = "Manual"
+        }
+        [pscustomobject]@{
+            SettingId = "FILES-006"
+            Setting = "Block Microsoft Publisher"
+            Workload = "Microsoft 365 Apps"
+            ExpectedValue = "Office Cloud Policy Service Disable Publisher policy enforced"
+            SourceUrl = "https://learn.microsoft.com/en-us/microsoft-365/baseline-security-mode/block-microsoft-publisher"
+            Automation = "Manual"
+        }
+        [pscustomobject]@{
+            SettingId = "ROOMS-001"
+            Setting = "Don't allow resource accounts on Teams Rooms devices to access Microsoft 365 files when not in use"
+            Workload = "Teams / Collaboration"
+            ExpectedValue = "RestrictResourceAccountAccess = true"
+            SourceUrl = "https://learn.microsoft.com/en-us/powershell/module/microsoft.online.sharepoint.powershell/set-spotenant"
+            Automation = "Manual"
+        }
+        [pscustomobject]@{
+            SettingId = "ROOMS-002"
+            Setting = "Only allow endpoint-managed compliant Teams Rooms devices to sign in"
+            Workload = "Teams / Collaboration"
+            ExpectedValue = "Documented dynamic resource-account group, Conditional Access compliance policy, and access-package join window are all configured"
+            SourceUrl = "https://learn.microsoft.com/en-us/microsoftteams/rooms/block-non-compliant-teams-rooms-devices"
+            Automation = "Manual"
+        }
+    )
+}
+
+function New-SecureM365BaselineResult {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $CatalogEntry,
+        [Parameter(Mandatory)]
+        [ValidateSet("ENABLED", "DISABLED", "UNKNOWN")]
+        [string] $Status,
+        [AllowNull()][Nullable[bool]] $Resolved,
+        [AllowNull()] $ActualValue,
+        [Parameter(Mandatory)][string] $Evidence,
+        [datetimeoffset] $CheckedAt = [datetimeoffset]::UtcNow
+    )
+
+    if ($Status -eq "UNKNOWN" -and $null -ne $Resolved) {
+        throw "UNKNOWN baseline results must not contain a Resolved Boolean."
+    }
+    if ($Status -ne "UNKNOWN" -and $null -eq $Resolved) {
+        throw "$Status baseline results require a Resolved Boolean."
+    }
+
+    [pscustomobject]@{
+        SettingId    = [string] $CatalogEntry.SettingId
+        Setting      = [string] $CatalogEntry.Setting
+        Workload     = [string] $CatalogEntry.Workload
+        Status       = $Status
+        Resolved     = $Resolved
+        ActualValue  = $ActualValue
+        ExpectedValue = [string] $CatalogEntry.ExpectedValue
+        Evidence     = $Evidence
+        SourceUrl    = [string] $CatalogEntry.SourceUrl
+        CheckedAt    = $CheckedAt
+    }
+}
+
+function New-SecureM365BaselineReport {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][guid] $TenantId,
+        [Parameter(Mandatory)][object[]] $Results,
+        [datetimeoffset] $CheckedAt = [datetimeoffset]::UtcNow
+    )
+
+    $catalog = @(Get-SecureM365BaselineCatalog)
+    $resultArray = @($Results | Sort-Object SettingId)
+    $duplicates = @($resultArray | Group-Object SettingId | Where-Object Count -ne 1)
+    $missing = @($catalog.SettingId | Where-Object { $_ -notin $resultArray.SettingId })
+    $unexpected = @($resultArray.SettingId | Where-Object { $_ -notin $catalog.SettingId })
+    if (
+        $resultArray.Count -ne $catalog.Count -or
+        $duplicates.Count -gt 0 -or
+        $missing.Count -gt 0 -or
+        $unexpected.Count -gt 0
+    ) {
+        throw "Baseline aggregation was incomplete or duplicated. Expected $($catalog.Count), received $($resultArray.Count); missing: $($missing -join ', '); unexpected: $($unexpected -join ', ')."
+    }
+
+    [pscustomobject]@{
+        TenantId = $TenantId.Guid
+        CheckedAt = $CheckedAt
+        Total = $resultArray.Count
+        Enabled = @($resultArray | Where-Object Status -eq "ENABLED").Count
+        Disabled = @($resultArray | Where-Object Status -eq "DISABLED").Count
+        Unknown = @($resultArray | Where-Object Status -eq "UNKNOWN").Count
+        Results = $resultArray
+    }
+}
+
 Export-ModuleMember -Function @(
     "Resolve-SecureM365TenantId"
     "Connect-SecureM365Graph"
@@ -1002,4 +1237,7 @@ Export-ModuleMember -Function @(
     "Get-SecureM365SecurityDefaultsEnabled"
     "Reset-SecureM365ScoreCache"
     "Test-SecureM365ScoreAction"
+    "Get-SecureM365BaselineCatalog"
+    "New-SecureM365BaselineResult"
+    "New-SecureM365BaselineReport"
 )

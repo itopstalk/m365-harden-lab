@@ -187,6 +187,12 @@ $roleRequirements = @(
         )
     }
     @{
+        Capability = "Read the default app management policy"
+        Scripts = "62, 69"
+        Role = "Global Reader"
+        Alternatives = @()
+    }
+    @{
         Capability = "Manage Teams meeting policies"
         Scripts = "01 -IncludeTeams, 40-45, 99"
         Role = "Teams Communications Administrator"
@@ -219,6 +225,7 @@ $requiredModules = @(
     "Microsoft.Graph.Identity.SignIns"
     "Microsoft.Graph.Identity.Governance"
     "MicrosoftTeams"
+    "ExchangeOnlineManagement"
 )
 
 function Get-PermissionErrorDetail {
@@ -501,6 +508,7 @@ if (-not $blockedReason) {
         @{ Name = "User inventory"; Path = 'users?$select=id&$top=1'; Property = "value" }
         @{ Name = "Initial domain inventory"; Path = 'domains?$select=id'; Property = "value" }
         @{ Name = "Authorization policy"; Path = "policies/authorizationPolicy"; Property = "id" }
+        @{ Name = "Default app management policy"; Path = "policies/defaultAppManagementPolicy"; Property = "id" }
         @{ Name = "Authentication registration report"; Path = "reports/authenticationMethods/userRegistrationDetails"; Property = "value" }
         @{ Name = "Secure Score"; Path = 'security/secureScores?$top=1'; Property = "value" }
         @{ Name = "Secure Score control profiles"; Path = 'security/secureScoreControlProfiles?$top=1'; Property = "value" }
@@ -647,7 +655,7 @@ $missingModules = @($modules | Where-Object { -not $_.Installed } | ForEach-Obje
 $missingScopes = @($graphPermissions | Where-Object Status -eq "NOT IN TOKEN" | ForEach-Object { $_.Scope })
 $ready = -not $blockedReason -and $missingRoles.Count -eq 0 -and $missingScopes.Count -eq 0 -and
     $missingModules.Count -eq 0 -and $created.Count -eq 0 -and
-    $accessChecks.Count -eq 10 -and @($accessChecks | Where-Object Status -ne "PASSED").Count -eq 0
+    $accessChecks.Count -eq 11 -and @($accessChecks | Where-Object Status -ne "PASSED").Count -eq 0
 if ($missingModules.Count -gt 0) {
     Write-Warning "Missing modules: $($missingModules -join ', '). Run script 00; this script does not install tools."
 }
