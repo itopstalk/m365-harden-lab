@@ -54,6 +54,11 @@ additional write scopes. Initial discovery can still require read-scope consent.
 .PARAMETER UseGraphDeviceCode
 Use device-code authentication for Microsoft Graph.
 
+.PARAMETER UseGraphBrowserPkce
+Use system-browser authorization code authentication with PKCE and a temporary
+localhost callback. Use this in the GitHub Copilot App embedded terminal when
+normal or device-code prompts are not displayed.
+
 .PARAMETER UseTeamsDeviceAuthentication
 Use device authentication for Microsoft Teams.
 
@@ -91,6 +96,7 @@ param(
 
     [switch] $CheckOnly,
     [switch] $UseGraphDeviceCode,
+    [switch] $UseGraphBrowserPkce,
     [switch] $UseTeamsDeviceAuthentication
 )
 
@@ -198,8 +204,10 @@ function Get-VerifiedAdminIdentity {
     param([string] $ExpectedId)
     $currentContext = Get-MgContext
     if (
-        $null -eq $currentContext -or $currentContext.TenantId -ne $TenantId.Guid -or
-        $currentContext.AuthType -ne "Delegated" -or $currentContext.Environment -ne "Global"
+        $null -eq $currentContext -or
+        ($currentContext.TenantId -and $currentContext.TenantId -ne $TenantId.Guid) -or
+        $currentContext.AuthType -notin @("Delegated", "UserProvidedAccessToken") -or
+        $currentContext.Environment -ne "Global"
     ) {
         throw "A delegated Microsoft Graph connection to the intended worldwide tenant is required."
     }
@@ -282,7 +290,7 @@ function Get-MissingRolePlan {
 }
 
 function Get-GraphPermissionCoverage {
-    $tokenScopes = @( (Get-MgContext).Scopes )
+    $tokenScopes = @($script:graphContext.Scopes)
     foreach ($scope in $requiredScopes) {
         [pscustomobject]@{
             Scope = $scope
@@ -291,8 +299,9 @@ function Get-GraphPermissionCoverage {
     }
 }
 
-$null = Connect-SecureM365Graph -TenantId $TenantId `
-    -AdditionalScopes "Directory.Read.All" -UseDeviceCode:$UseGraphDeviceCode
+$script:graphContext = Connect-SecureM365Graph -TenantId $TenantId `
+    -AdditionalScopes "Directory.Read.All" -UseDeviceCode:$UseGraphDeviceCode `
+    -UseBrowserPkce:$UseGraphBrowserPkce
 $admin = Get-VerifiedAdminIdentity
 Write-Host "`nChecking $($admin.userPrincipalName) ($($admin.id)) in tenant $($TenantId.Guid)"
 
@@ -371,8 +380,9 @@ elseif (-not $CheckOnly) {
         $missingScopes.Count -gt 0 -and
         $PSCmdlet.ShouldProcess($admin.userPrincipalName, "Request delegated Graph scopes through interactive consent: $($missingScopes -join ', ')")
     ) {
-        $null = Connect-SecureM365Graph -TenantId $TenantId `
-            -AdditionalScopes $requiredScopes -UseDeviceCode:$UseGraphDeviceCode
+        $script:graphContext = Connect-SecureM365Graph -TenantId $TenantId `
+            -AdditionalScopes $requiredScopes -UseDeviceCode:$UseGraphDeviceCode `
+            -UseBrowserPkce:$UseGraphBrowserPkce
         $null = Get-VerifiedAdminIdentity -ExpectedId $admin.id
         $graphPermissions = @(Get-GraphPermissionCoverage)
     }
@@ -386,7 +396,7 @@ elseif (-not $CheckOnly) {
                 continue
             }
             $null = Get-VerifiedAdminIdentity -ExpectedId $admin.id
-            if ("RoleManagement.ReadWrite.Directory" -notin (Get-MgContext).Scopes) {
+            if ("RoleManagement.ReadWrite.Directory" -notin $script:graphContext.Scopes) {
                 throw "The current Graph token lacks RoleManagement.ReadWrite.Directory. Consent was not completed; no further roles will be assigned."
             }
             $currentRoles = @(Get-AdminActiveRoles)

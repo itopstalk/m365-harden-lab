@@ -13,6 +13,20 @@ Run with -IncludeTeams before script 99 to detect Teams access failures early.
 Use script 05 before configuration scripts to check all required administrator
 roles and Graph permissions and, with confirmation, assign missing lab roles.
 
+In the GitHub Copilot App's embedded terminal, use -UseGraphBrowserPkce. It opens
+Microsoft sign-in in the system browser and receives the authorization result on
+a temporary localhost callback. Passwords are never accepted or stored by this
+script. On first use, Microsoft may ask for delegated consent to the listed scopes.
+
+.PARAMETER TenantId
+Microsoft Entra tenant GUID. When omitted, the script prompts for it and rejects
+blank, non-GUID, and all-zero values.
+
+.PARAMETER UseGraphBrowserPkce
+Use browser authorization-code authentication with PKCE, a random state and
+nonce, and a temporary loopback callback. This is intended for embedded or
+managed terminals where WAM and device-code prompts are not displayed.
+
 .PARAMETER IncludeTeams
 Also connect to Microsoft Teams and verify meeting-policy read access. The Teams
 account needs an active role permitted to read meeting policies, such as Teams
@@ -23,27 +37,32 @@ and rerun this script to refresh the session.
 .EXAMPLE
 .\01-Test-TenantConnections.ps1 -TenantId $TenantId -IncludeTeams
 
+.EXAMPLE
+.\01-Test-TenantConnections.ps1 -UseGraphBrowserPkce
+
 .LINK
 https://learn.microsoft.com/microsoftteams/using-admin-roles
 #>
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
-    [guid] $TenantId,
+    [string] $TenantId,
 
     [switch] $IncludeTeams,
     [switch] $UseGraphDeviceCode,
+    [switch] $UseGraphBrowserPkce,
     [switch] $UseTeamsDeviceAuthentication
 )
 
 $ErrorActionPreference = "Stop"
 $commonModule = Join-Path $PSScriptRoot "SecureM365.Common.psm1"
 Import-Module $commonModule -Force -ErrorAction Stop
+$TenantId = Resolve-SecureM365TenantId -TenantId $TenantId -PromptIfMissing
 
 $graphContext = Connect-SecureM365Graph `
     -TenantId $TenantId `
-    -UseDeviceCode:$UseGraphDeviceCode
+    -UseDeviceCode:$UseGraphDeviceCode `
+    -UseBrowserPkce:$UseGraphBrowserPkce
 
 $graphContext |
     Select-Object Account, TenantId, AuthType, ContextScope, Scopes

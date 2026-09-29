@@ -1,3 +1,254 @@
+function ConvertTo-SecureM365Base64Url {
+    param([Parameter(Mandatory)][byte[]] $Bytes)
+    [Convert]::ToBase64String($Bytes).TrimEnd("=").Replace("+", "-").Replace("/", "_")
+}
+
+function ConvertFrom-SecureM365JwtPayload {
+    param([Parameter(Mandatory)][string] $Token)
+
+    $segments = $Token.Split(".")
+    if ($segments.Count -ne 3) {
+        throw "Microsoft did not return a valid ID token."
+    }
+    $payload = $segments[1].Replace("-", "+").Replace("_", "/")
+    $payload = $payload.PadRight($payload.Length + ((4 - ($payload.Length % 4)) % 4), "=")
+    try {
+        [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)) |
+            ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "Microsoft returned an ID token with an invalid payload."
+    }
+}
+
+function Resolve-SecureM365TenantId {
+    [CmdletBinding()]
+    [OutputType([guid])]
+    param(
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string] $TenantId,
+
+        [switch] $PromptIfMissing
+    )
+
+    if ([string]::IsNullOrWhiteSpace($TenantId) -and $PromptIfMissing) {
+        $TenantId = Read-Host "Microsoft Entra tenant ID (GUID)"
+    }
+
+    $parsedTenantId = [guid]::Empty
+    if (
+        [string]::IsNullOrWhiteSpace($TenantId) -or
+        -not [guid]::TryParse($TenantId, [ref] $parsedTenantId) -or
+        $parsedTenantId -eq [guid]::Empty
+    ) {
+        throw "TenantId must be a non-empty Microsoft Entra tenant GUID."
+    }
+    $parsedTenantId
+}
+
+function Get-SecureM365OAuthAuthorizationCode {
+    param(
+        [Parameter(Mandatory)]
+        [Collections.Specialized.NameValueCollection] $Query,
+
+        [Parameter(Mandatory)]
+        [string] $ExpectedState
+    )
+
+    if ($Query["state"] -cne $ExpectedState) {
+        throw "OAuth state validation failed. No Graph connection was created."
+    }
+    if ($Query["error"]) {
+        throw "Microsoft authorization failed ($($Query["error"])): $($Query["error_description"])"
+    }
+    if ([string]::IsNullOrWhiteSpace($Query["code"])) {
+        throw "Microsoft returned no authorization code."
+    }
+    [string] $Query["code"]
+}
+
+function Get-SecureM365ValidatedBrowserToken {
+    param(
+        [Parameter(Mandatory)] $TokenResponse,
+        [Parameter(Mandatory)][guid] $TenantId,
+        [Parameter(Mandatory)][string[]] $Scopes,
+        [Parameter(Mandatory)][string] $ClientId,
+        [Parameter(Mandatory)][string] $Nonce
+    )
+
+    if (
+        [string]::IsNullOrWhiteSpace($TokenResponse.access_token) -or
+        [string]::IsNullOrWhiteSpace($TokenResponse.id_token)
+    ) {
+        throw "Microsoft returned an incomplete token response."
+    }
+    $claims = ConvertFrom-SecureM365JwtPayload $TokenResponse.id_token
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $expectedIssuer = "https://login.microsoftonline.com/$($TenantId.Guid)/v2.0"
+    if (
+        [string] $claims.aud -ne $ClientId -or
+        [string] $claims.iss -ne $expectedIssuer -or
+        [string] $claims.tid -ne $TenantId.Guid -or
+        [string] $claims.nonce -cne $Nonce -or
+        [long] $claims.exp -le $now
+    ) {
+        throw "Microsoft ID-token validation failed for the requested client, issuer, tenant, nonce, or expiry."
+    }
+
+    $grantedScopes = @([string] $TokenResponse.scope -split "\s+" | Where-Object { $_ })
+    $missingScopes = @($Scopes | Where-Object { $_ -notin $grantedScopes })
+    if ($missingScopes.Count -gt 0) {
+        throw "Microsoft did not grant the required Graph scopes: $($missingScopes -join ', '). Review consent and retry."
+    }
+
+    [pscustomobject]@{
+        AccessToken = [string] $TokenResponse.access_token
+        Scopes      = $grantedScopes
+        TenantId   = [string] $claims.tid
+    }
+}
+
+function Invoke-SecureM365BrowserPkce {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [guid] $TenantId,
+
+        [Parameter(Mandatory)]
+        [string[]] $Scopes,
+
+        [ValidateRange(30, 900)]
+        [int] $TimeoutSeconds = 180
+    )
+
+    $clientId = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
+    $random = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $verifierBytes = [byte[]]::new(64)
+        $stateBytes = [byte[]]::new(32)
+        $nonceBytes = [byte[]]::new(32)
+        $random.GetBytes($verifierBytes)
+        $random.GetBytes($stateBytes)
+        $random.GetBytes($nonceBytes)
+    }
+    finally {
+        $random.Dispose()
+    }
+
+    $codeVerifier = ConvertTo-SecureM365Base64Url $verifierBytes
+    $state = ConvertTo-SecureM365Base64Url $stateBytes
+    $nonce = ConvertTo-SecureM365Base64Url $nonceBytes
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $challenge = ConvertTo-SecureM365Base64Url (
+            $sha256.ComputeHash([Text.Encoding]::ASCII.GetBytes($codeVerifier))
+        )
+    }
+    finally {
+        $sha256.Dispose()
+    }
+
+    $portProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    $portProbe.Start()
+    $port = ([Net.IPEndPoint] $portProbe.LocalEndpoint).Port
+    $portProbe.Stop()
+    $redirectUri = "http://localhost:$port/"
+    $listener = [Net.HttpListener]::new()
+    $listener.Prefixes.Add($redirectUri)
+
+    $authorizationParameters = [ordered]@{
+        client_id             = $clientId
+        response_type         = "code"
+        redirect_uri          = $redirectUri
+        response_mode         = "query"
+        scope                 = (@("openid", "profile") + $Scopes | Sort-Object -Unique) -join " "
+        state                 = $state
+        nonce                 = $nonce
+        code_challenge        = $challenge
+        code_challenge_method = "S256"
+        prompt                = "select_account"
+    }
+    $authorizationQuery = ($authorizationParameters.GetEnumerator() | ForEach-Object {
+        "{0}={1}" -f [uri]::EscapeDataString($_.Key), [uri]::EscapeDataString([string] $_.Value)
+    }) -join "&"
+    $authorizationUri =
+        "https://login.microsoftonline.com/$($TenantId.Guid)/oauth2/v2.0/authorize?$authorizationQuery"
+
+    try {
+        try {
+            $listener.Start()
+        }
+        catch {
+            throw "Cannot open the local OAuth callback at '$redirectUri'. Check local listener/firewall policy and retry. $($_.Exception.Message)"
+        }
+
+        Write-Host "Opening Microsoft sign-in in your browser. Credentials are entered only on Microsoft's page."
+        Write-Host "Waiting up to $TimeoutSeconds seconds for the local callback at $redirectUri"
+        Start-Process $authorizationUri -ErrorAction Stop
+
+        $contextTask = $listener.GetContextAsync()
+        if (-not $contextTask.Wait([TimeSpan]::FromSeconds($TimeoutSeconds))) {
+            throw "Timed out waiting for Microsoft sign-in. Rerun the command and complete the browser prompt within $TimeoutSeconds seconds."
+        }
+        $callback = $contextTask.GetAwaiter().GetResult()
+        $responseText = if (
+            $callback.Request.QueryString["error"] -or
+            $callback.Request.QueryString["state"] -cne $state
+        ) {
+            "Authentication failed. Return to the terminal for details."
+        }
+        else {
+            "Authentication completed. You can close this window and return to the terminal."
+        }
+        $responseBytes = [Text.Encoding]::UTF8.GetBytes(
+            "<!doctype html><html><body><p>$responseText</p></body></html>"
+        )
+        $callback.Response.StatusCode = 200
+        $callback.Response.ContentType = "text/html; charset=utf-8"
+        $callback.Response.ContentLength64 = $responseBytes.Length
+        $callback.Response.OutputStream.Write($responseBytes, 0, $responseBytes.Length)
+        $callback.Response.Close()
+
+        $authorizationCode = Get-SecureM365OAuthAuthorizationCode `
+            -Query $callback.Request.QueryString `
+            -ExpectedState $state
+
+        Write-Host "Browser sign-in completed. Exchanging the one-time code without storing credentials..."
+        try {
+            $token = Invoke-RestMethod `
+                -Method POST `
+                -Uri "https://login.microsoftonline.com/$($TenantId.Guid)/oauth2/v2.0/token" `
+                -ContentType "application/x-www-form-urlencoded" `
+                -Body @{
+                    client_id     = $clientId
+                    grant_type    = "authorization_code"
+                    code          = $authorizationCode
+                    redirect_uri  = $redirectUri
+                    code_verifier = $codeVerifier
+                    scope         = $authorizationParameters.scope
+                } `
+                -ErrorAction Stop
+        }
+        catch {
+            throw "Microsoft token exchange failed. No credentials or tokens were saved. $($_.Exception.Message)"
+        }
+
+        Get-SecureM365ValidatedBrowserToken `
+            -TokenResponse $token `
+            -TenantId $TenantId `
+            -Scopes $Scopes `
+            -ClientId $clientId `
+            -Nonce $nonce
+    }
+    finally {
+        if ($listener.IsListening) {
+            $listener.Stop()
+        }
+        $listener.Close()
+    }
+}
+
 function Connect-SecureM365Graph {
     [CmdletBinding()]
     param(
@@ -5,8 +256,13 @@ function Connect-SecureM365Graph {
         [guid] $TenantId,
 
         [string[]] $AdditionalScopes = @(),
-        [switch] $UseDeviceCode
+        [switch] $UseDeviceCode,
+        [switch] $UseBrowserPkce
     )
+
+    if ($UseDeviceCode -and $UseBrowserPkce) {
+        throw "UseDeviceCode and UseBrowserPkce cannot be combined."
+    }
 
     $readScopes = @(
         "AuditLog.Read.All"
@@ -20,6 +276,74 @@ function Connect-SecureM365Graph {
         $AdditionalScopes
     ) | Sort-Object -Unique
 
+    $context = Get-MgContext -ErrorAction SilentlyContinue
+    $pkceMetadata = Get-Variable -Name SecureM365GraphContextMetadata -Scope Global `
+        -ValueOnly -ErrorAction SilentlyContinue
+    $contextTenantId = [string] $context.TenantId
+    $contextScopes = @($context.Scopes)
+    if (
+        $null -ne $context -and
+        [string] $context.AuthType -eq "UserProvidedAccessToken" -and
+        $null -ne $pkceMetadata
+    ) {
+        if ([string]::IsNullOrWhiteSpace($contextTenantId)) {
+            $contextTenantId = [string] $pkceMetadata.TenantId
+        }
+        if ($contextScopes.Count -eq 0) {
+            $contextScopes = @($pkceMetadata.Scopes)
+        }
+    }
+    $missingContextScopes = @($scopes | Where-Object { $_ -notin $contextScopes })
+    if (
+        $null -ne $context -and
+        $contextTenantId -eq $TenantId.Guid -and
+        [string] $context.AuthType -in @("Delegated", "UserProvidedAccessToken") -and
+        [string] $context.Environment -eq "Global" -and
+        $missingContextScopes.Count -eq 0
+    ) {
+        try {
+            $existingIdentity = Invoke-MgGraphRequest `
+                -Method GET `
+                -Uri "https://graph.microsoft.com/v1.0/me?`$select=id,userPrincipalName" `
+                -ErrorAction Stop
+            if (
+                [string]::IsNullOrWhiteSpace($existingIdentity.id) -or
+                [string]::IsNullOrWhiteSpace($existingIdentity.userPrincipalName)
+            ) {
+                throw "Graph returned an incomplete signed-in user."
+            }
+            if (
+                [string] $context.AuthType -eq "UserProvidedAccessToken" -and
+                $null -ne $pkceMetadata -and
+                (
+                    [string] $existingIdentity.id -ne [string] $pkceMetadata.IdentityId -or
+                    [string] $existingIdentity.userPrincipalName -ne [string] $pkceMetadata.Account
+                )
+            ) {
+                throw "The signed-in Graph user does not match the validated browser-PKCE context."
+            }
+            if ([string]::IsNullOrWhiteSpace([string] $context.TenantId)) {
+                $context | Add-Member -NotePropertyName TenantId -NotePropertyValue $contextTenantId -Force
+            }
+            if (@($context.Scopes).Count -eq 0) {
+                $context | Add-Member -NotePropertyName Scopes -NotePropertyValue ([string[]] $contextScopes) -Force
+            }
+            Write-Verbose "Reusing the existing validated Graph context for tenant '$($TenantId.Guid)'."
+            return $context
+        }
+        catch {
+            Write-Host "The existing Graph context is no longer usable; reconnecting."
+        }
+    }
+
+    if (
+        -not $UseDeviceCode -and -not $UseBrowserPkce -and
+        $null -ne $context -and [string] $context.AuthType -eq "UserProvidedAccessToken"
+    ) {
+        $UseBrowserPkce = $true
+        Write-Host "The existing browser-PKCE context needs additional scopes; reopening Microsoft sign-in."
+    }
+
     $connectParameters = @{
         TenantId     = $TenantId.Guid
         Scopes       = [string[]] $scopes
@@ -27,31 +351,76 @@ function Connect-SecureM365Graph {
         NoWelcome    = $true
         ErrorAction  = "Stop"
     }
-    if ($UseDeviceCode) {
+    if ($UseBrowserPkce) {
+        $pkceToken = Invoke-SecureM365BrowserPkce -TenantId $TenantId -Scopes $scopes
+        $secureAccessToken = ConvertTo-SecureString $pkceToken.AccessToken -AsPlainText -Force
+        $pkceToken.AccessToken = $null
+        $connectParameters = @{
+            AccessToken = $secureAccessToken
+            NoWelcome   = $true
+            ErrorAction = "Stop"
+        }
+    }
+    elseif ($UseDeviceCode) {
         $connectParameters.UseDeviceCode = $true
     }
 
+    Write-Host "Connecting to Microsoft Graph tenant '$($TenantId.Guid)'..."
     Connect-MgGraph @connectParameters
     $context = Get-MgContext
 
     if (
         $null -eq $context -or
-        $context.TenantId -ne $TenantId.Guid -or
-        $context.AuthType -ne "Delegated"
+        ($context.TenantId -and $context.TenantId -ne $TenantId.Guid) -or
+        $context.AuthType -notin @("Delegated", "UserProvidedAccessToken") -or
+        $context.Environment -ne "Global"
     ) {
         Disconnect-MgGraph -ErrorAction SilentlyContinue
-        throw "Microsoft Graph did not connect to tenant '$($TenantId.Guid)' with delegated authentication."
+        throw "Microsoft Graph did not connect to the intended worldwide tenant '$($TenantId.Guid)' with delegated authentication."
     }
 
+    if ($UseBrowserPkce) {
+        $contextScopes = @($pkceToken.Scopes)
+    }
+    else {
+        $contextScopes = @($context.Scopes)
+    }
     $missingScopes = @(
         $scopes |
-        Where-Object { $_ -notin $context.Scopes }
+        Where-Object { $_ -notin $contextScopes }
     )
     if ($missingScopes.Count -gt 0) {
         Disconnect-MgGraph -ErrorAction SilentlyContinue
         throw "The Graph token is missing consented scopes: $($missingScopes -join ', ')"
     }
 
+    try {
+        $identity = Invoke-MgGraphRequest `
+            -Method GET `
+            -Uri "https://graph.microsoft.com/v1.0/me?`$select=id,userPrincipalName" `
+            -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($identity.id) -or [string]::IsNullOrWhiteSpace($identity.userPrincipalName)) {
+            throw "Graph returned an incomplete signed-in user."
+        }
+    }
+    catch {
+        Disconnect-MgGraph -ErrorAction SilentlyContinue
+        throw "Microsoft Graph did not validate delegated user access for tenant '$($TenantId.Guid)'. $($_.Exception.Message)"
+    }
+
+    if ($UseBrowserPkce) {
+        $context | Add-Member -NotePropertyName TenantId -NotePropertyValue $TenantId.Guid -Force
+        $context | Add-Member -NotePropertyName Scopes -NotePropertyValue ([string[]] $pkceToken.Scopes) -Force
+        $global:SecureM365GraphContextMetadata = [pscustomobject]@{
+            TenantId   = $TenantId.Guid
+            Scopes     = [string[]] $pkceToken.Scopes
+            IdentityId = [string] $identity.id
+            Account    = [string] $identity.userPrincipalName
+        }
+    }
+    else {
+        Remove-Variable -Name SecureM365GraphContextMetadata -Scope Global -ErrorAction SilentlyContinue
+    }
     $context
 }
 
@@ -409,6 +778,7 @@ function Test-SecureM365ScoreAction {
 }
 
 Export-ModuleMember -Function @(
+    "Resolve-SecureM365TenantId"
     "Connect-SecureM365Graph"
     "Connect-SecureM365Teams"
     "Get-SecureM365TeamsMeetingPolicy"
