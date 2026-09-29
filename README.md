@@ -108,6 +108,30 @@ The returned report includes `Ready`, `MissingRoles`, `RoleCoverage`,
 `GraphPermissions`, `AccessChecks`, and `AssignmentsCreated`. Use
 `Get-Help .\05-Verify-Admin-Permissions.ps1 -Full` for details and reference links.
 
+## Conditional Access policy creation mode
+
+Scripts 10, 12, 14, 16, and 18 create new Conditional Access policies as
+**enabled and immediately enforced by default**. Before running them, validate
+both emergency access accounts and confirm that affected administrators and users
+are ready for MFA, modern authentication, and risk remediation as applicable.
+These scripts never change an existing same-named policy; duplicate-name
+protection stops creation for manual review.
+
+Use `-ReportOnly` for staged creation:
+
+```powershell
+.\10-New-AdminMfaPolicy.ps1 -TenantId $TenantId -EmergencyAccessAccountId $EmergencyAccountIds -ReportOnly
+.\12-New-AllUserMfaPolicy.ps1 -TenantId $TenantId -EmergencyAccessAccountId $EmergencyAccountIds -ReportOnly
+.\14-New-BlockLegacyAuthenticationPolicy.ps1 -TenantId $TenantId -ReportOnly
+.\16-New-SignInRiskPolicy.ps1 -TenantId $TenantId -EmergencyAccessAccountId $EmergencyAccountIds -ReportOnly
+.\18-New-UserRiskPolicy.ps1 -TenantId $TenantId -EmergencyAccessAccountId $EmergencyAccountIds -ReportOnly
+```
+
+`-WhatIf` performs no policy write and identifies whether the requested creation
+would be **enforced** (default) or **report-only**. Script 20 remains the explicit
+path for enabling a previously staged, reviewed policy; the creation scripts do
+not silently update or enable existing policies.
+
 ## Teams meeting policy scope
 
 [Script 40](scripts/40-Set-TeamsInvitedUsersLobbyPolicy.ps1),

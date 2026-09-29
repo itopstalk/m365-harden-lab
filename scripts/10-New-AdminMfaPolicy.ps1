@@ -1,6 +1,21 @@
 #Requires -Version 7.2
 #Requires -Modules Microsoft.Graph.Authentication, Microsoft.Graph.Identity.SignIns, Microsoft.Graph.Identity.Governance
 
+<#
+.SYNOPSIS
+Creates the administrator MFA Conditional Access policy.
+.DESCRIPTION
+Creates an immediately enforced policy by default. Validate emergency access
+and administrator MFA readiness first. Use -ReportOnly for staged creation.
+-WhatIf previews the selected enforced or report-only mode without writing.
+.PARAMETER ReportOnly
+Create the policy in report-only mode instead of enforcing it immediately.
+.EXAMPLE
+.\10-New-AdminMfaPolicy.ps1 -TenantId $TenantId -EmergencyAccessAccountId $EmergencyAccountIds
+.EXAMPLE
+.\10-New-AdminMfaPolicy.ps1 -TenantId $TenantId -EmergencyAccessAccountId $EmergencyAccountIds -ReportOnly
+#>
+
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = "High")]
 param(
     [Parameter(Mandatory)]
@@ -10,7 +25,8 @@ param(
     [ValidateCount(2, 10)]
     [guid[]] $EmergencyAccessAccountId,
 
-    [switch] $UseDeviceCode
+    [switch] $UseDeviceCode,
+    [switch] $ReportOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -57,9 +73,11 @@ $adminRoleTemplateIds = @(
     }
 )
 
+$policyMode = if ($ReportOnly) { "report-only" } else { "enforced" }
+$policyState = if ($ReportOnly) { "enabledForReportingButNotEnforced" } else { "enabled" }
 $body = @{
     displayName = "CA001 - Require MFA for administrator roles"
-    state       = "enabledForReportingButNotEnforced"
+    state       = $policyState
     conditions  = @{
         clientAppTypes = @("all")
         applications   = @{
@@ -77,7 +95,7 @@ $body = @{
     }
 }
 
-if ($PSCmdlet.ShouldProcess($TenantId.Guid, "Create report-only administrator MFA policy")) {
+if ($PSCmdlet.ShouldProcess($TenantId.Guid, "Create $policyMode administrator MFA policy")) {
     New-SecureM365ConditionalAccessPolicy -BodyParameter $body |
         Select-Object Id, DisplayName, State
 }
