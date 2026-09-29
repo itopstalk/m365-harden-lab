@@ -527,10 +527,7 @@ function Connect-SecureM365Teams {
 
     if ($ValidateMeetingPolicyAccess) {
         try {
-            $globalPolicy = @(Get-CsTeamsMeetingPolicy -Identity Global -ErrorAction Stop)
-            if ($globalPolicy.Count -ne 1 -or $globalPolicy[0].Identity -ne "Global") {
-                throw "Microsoft Teams did not return the Global meeting policy."
-            }
+            $null = Get-SecureM365TeamsMeetingPolicy
         }
         catch {
             $details = $_.Exception.Message
@@ -741,53 +738,17 @@ function Get-SecureM365TeamsProvisioningStatus {
 }
 
 function Get-SecureM365TeamsMeetingPolicy {
-    [CmdletBinding(DefaultParameterSetName = "SelectedPolicies")]
-    param(
-        [Parameter(ParameterSetName = "SelectedPolicies")]
-        [ValidateNotNullOrEmpty()]
-        [string[]] $PolicyIdentity = @("Global"),
+    [CmdletBinding()]
+    param()
 
-        [Parameter(Mandatory, ParameterSetName = "AllPolicies")]
-        [switch] $AllPolicies
-    )
-
-    $policies = @(
-        if ($AllPolicies) {
-            Get-CsTeamsMeetingPolicy -ErrorAction Stop
-        }
-        else {
-            foreach ($identity in $PolicyIdentity) {
-                if ([string]::IsNullOrWhiteSpace($identity)) {
-                    throw "Supply a nonempty Teams meeting policy identity."
-                }
-                $matches = @(Get-CsTeamsMeetingPolicy -Identity $identity -ErrorAction Stop)
-                $expectedIdentity = if ($identity -eq "Global") {
-                    "Global"
-                }
-                else {
-                    "Tag:" + ($identity -replace '^Tag:', '')
-                }
-                if ($matches.Count -ne 1 -or [string] $matches[0].Identity -ne $expectedIdentity) {
-                    throw "Teams did not return exactly the requested meeting policy '$identity'. No policies were changed."
-                }
-                $matches[0]
-            }
-        }
-    )
-
-    $seen = @{}
-    foreach ($policy in $policies) {
-        $identity = [string] $policy.Identity
-        if ([string]::IsNullOrWhiteSpace($identity) -or $seen.ContainsKey($identity)) {
-            throw "Teams returned a missing or duplicate meeting policy identity. No policies were changed."
-        }
-        $seen[$identity] = $true
+    $policies = @(Get-CsTeamsMeetingPolicy -Identity Global -ErrorAction Stop)
+    if ($policies.Count -ne 1) {
+        throw "Teams must return exactly one Global meeting policy, but returned $($policies.Count)."
     }
-    if ($policies.Count -eq 0 -or ($AllPolicies -and -not $seen.ContainsKey("Global"))) {
-        throw "Teams returned an empty or incomplete meeting policy inventory (Global is required for -AllPolicies). No policies were changed."
+    if ([string] $policies[0].Identity -ne "Global") {
+        throw "Teams returned meeting policy identity '$($policies[0].Identity)' when Global was requested."
     }
-
-    $policies
+    $policies[0]
 }
 
 function Get-SecureM365TeamsMeetingPolicyUpdateError {
@@ -801,27 +762,7 @@ function Get-SecureM365TeamsMeetingPolicyUpdateError {
         [System.Management.Automation.ErrorRecord] $ErrorRecord
     )
 
-    $details = $ErrorRecord.Exception.Message
-    if (-not [string]::IsNullOrWhiteSpace($ErrorRecord.ErrorDetails.Message)) {
-        $details += " $($ErrorRecord.ErrorDetails.Message)"
-    }
-    # Ordinary authorization and validation failures must retain their original errors.
-    if ($details -notmatch "Tenant Admin can't modify first party documents") {
-        return $ErrorRecord
-    }
-
-    $message = "Teams policy '$PolicyIdentity' is a Microsoft-managed read-only preset. " +
-        "It cannot be edited by a tenant administrator; adding roles will not fix this error. " +
-        "Use -PolicyIdentity Global or explicitly select a tenant-created custom policy. " +
-        "Review user/group assignments before replacing a preset with a compliant policy. " +
-        "Execution stopped at this policy; remaining policies were not processed and earlier updates were not rolled back. " +
-        "Script 99 still audits read-only and unused presets. Original Teams error: $details"
-    [System.Management.Automation.ErrorRecord]::new(
-        [System.InvalidOperationException]::new($message, $ErrorRecord.Exception),
-        "SecureM365TeamsReadOnlyPolicy",
-        [System.Management.Automation.ErrorCategory]::InvalidOperation,
-        $PolicyIdentity
-    )
+    $ErrorRecord
 }
 
 function Get-SecureM365GraphCollection {

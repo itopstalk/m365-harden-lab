@@ -15,12 +15,9 @@ Complex combinations of narrower policies may need manual review.
 MFA and SSPR checks also use the authentication-method registration report, which
 requires Entra ID P1/P2 and can lag changes by up to 36 hours. Missing permissions,
 data, or manual evidence are UNKNOWN, never evidence of missing configuration.
-Teams checks include Global and every returned meeting policy, even predefined
-and unused policies. Scripts 40, 42, and 44 target this same inventory by default.
-Their -PolicyIdentity parameter can restrict updates, but does not limit this audit.
-Microsoft-managed presets are read-only. They can keep these checks NOT-CONFIGURED
-even when every editable policy matches the baseline. Review user/group assignments;
-this inventory audit does not establish which policies are effective for users.
+Teams checks intentionally assess only the org-wide Global meeting policy, which
+scripts 40, 42, and 44 configure. Custom meeting policies and their user/group
+assignments require separate review and are outside these checks.
 
 .PARAMETER TenantId
 Target tenant in the worldwide cloud. If omitted, uses the delegated Graph tenant
@@ -425,22 +422,17 @@ function Get-RiskAssessment {
 function Get-TeamsAssessment {
     param([string] $Property, $Expected)
 
-    $policies = @(Get-CheckData "Teams")
-    if ($policies.Count -eq 0 -or @($policies | Where-Object Identity -eq "Global").Count -ne 1) {
-        throw "Teams did not return the Global meeting policy; an empty or incomplete policy inventory cannot pass."
+    $policy = Get-CheckData "Teams"
+    if ($null -eq $policy.$Property) {
+        throw "Teams did not return '$Property' on the Global meeting policy."
     }
-    $unreadable = @($policies | Where-Object { $null -eq $_.$Property })
-    if ($unreadable.Count -gt 0) {
-        throw "Teams did not return '$Property' on every meeting policy."
+    if ($Expected -is [bool] -and $policy.$Property -isnot [bool]) {
+        throw "Teams returned a non-Boolean '$Property' value for the Global meeting policy."
     }
-    if ($Expected -is [bool] -and @($policies | Where-Object { $_.$Property -isnot [bool] }).Count -gt 0) {
-        throw "Teams returned a non-Boolean '$Property' value."
+    if ($policy.$Property -ne $Expected) {
+        return New-Assessment "NOT-CONFIGURED" "Global: $Property is '$($policy.$Property)'; expected '$Expected'."
     }
-    $nonCompliant = @($policies | Where-Object { $_.$Property -ne $Expected })
-    if ($nonCompliant.Count -gt 0) {
-        return New-Assessment "NOT-CONFIGURED" "$Property must be '$Expected'. Policies outside the baseline: $($nonCompliant.Identity -join ', '). Microsoft-managed read-only presets cannot be edited; review their assignments. This audit includes unused policies."
-    }
-    New-Assessment "IMPLEMENTED" "$Property is '$Expected' on all $($policies.Count) meeting policies (Global and every returned policy)."
+    New-Assessment "IMPLEMENTED" "Global: $Property is '$Expected'."
 }
 
 function Get-RoleBaselineAssessment {
@@ -543,7 +535,7 @@ $readers = [ordered]@{
             -CertificateThumbprint $TeamsCertificateThumbprint `
             -CertificatePath $TeamsCertificatePath `
             -CertificatePassword $TeamsCertificatePassword | Out-Null
-        Get-CsTeamsMeetingPolicy -ErrorAction Stop
+        Get-SecureM365TeamsMeetingPolicy
     }
 }
 $data = @{}

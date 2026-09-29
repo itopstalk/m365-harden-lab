@@ -1,38 +1,37 @@
 #Requires -Version 7.2
 
 $scriptsRoot = Join-Path (Split-Path $PSScriptRoot -Parent) "scripts"
-$script:policyCases = @(
+$script:mutatorCases = @(
     @{ File = "40-Set-TeamsInvitedUsersLobbyPolicy.ps1"; Property = "AutoAdmittedUsers"; Expected = "InvitedUsers" }
     @{ File = "42-Set-TeamsOrganizerOnlyPresenterPolicy.ps1"; Property = "DesignatedPresenterRoleMode"; Expected = "OrganizerOnlyUserOverride" }
     @{ File = "44-Disable-TeamsAnonymousMeetingJoin.ps1"; Property = "AllowAnonymousUsersToJoinMeeting"; Expected = $false }
 )
-$script:readOnlyCases = @(
-    foreach ($case in $script:policyCases) {
-        foreach ($source in @("Exception", "ErrorDetails")) {
-            @{ File = $case.File; Property = $case.Property; Expected = $case.Expected; ErrorSource = $source }
-        }
-    }
+$script:validatorCases = @(
+    @{ File = "41-Test-TeamsInvitedUsersLobbyPolicy.ps1"; Property = "AutoAdmittedUsers"; Expected = "InvitedUsers" }
+    @{ File = "43-Test-TeamsOrganizerOnlyPresenterPolicy.ps1"; Property = "DesignatedPresenterRoleMode"; Expected = "OrganizerOnlyUserOverride" }
+    @{ File = "45-Test-TeamsAnonymousMeetingJoin.ps1"; Property = "AllowAnonymousUsersToJoinMeeting"; Expected = $false }
 )
-$script:policyScripts = @{}
-$script:policySources = @{}
-foreach ($case in $script:policyCases) {
+$script:allScriptCases = @($script:mutatorCases) + @($script:validatorCases)
+$script:scriptBlocks = @{}
+$script:scriptSources = @{}
+foreach ($case in $script:allScriptCases) {
     $parseErrors = $null
     $source = [System.Management.Automation.Language.Parser]::ParseFile(
         (Join-Path $scriptsRoot $case.File), [ref] $null, [ref] $parseErrors
     )
     if ($parseErrors.Count -gt 0) { throw ($parseErrors.Message -join "; ") }
-    $script:policySources[$case.File] = $source
-    # Keep production parameter binding and bodies, but never import service modules.
+    $script:scriptSources[$case.File] = $source
     $statements = @($source.EndBlock.Statements | Where-Object {
         $_ -isnot [System.Management.Automation.Language.PipelineAst] -or
         $_.PipelineElements[0] -isnot [System.Management.Automation.Language.CommandAst] -or
         $_.PipelineElements[0].GetCommandName() -ne "Import-Module"
     })
-    $script:policyScripts[$case.File] = [scriptblock]::Create(
+    $script:scriptBlocks[$case.File] = [scriptblock]::Create(
         ($source.ParamBlock.Attributes.Extent.Text -join "`n") + "`n" +
         $source.ParamBlock.Extent.Text + "`n" + ($statements.Extent.Text -join "`n")
     )
 }
+
 foreach ($name in @("SecureM365.Common.psm1", "99-Test-M365RecommendationStatus.ps1")) {
     $source = [System.Management.Automation.Language.Parser]::ParseFile(
         (Join-Path $scriptsRoot $name), [ref] $null, [ref] $null
@@ -63,6 +62,8 @@ function Connect-MicrosoftTeams {
     throw "Unmocked Teams connection."
 }
 function Disconnect-MicrosoftTeams { [CmdletBinding()] param() throw "Unmocked Teams disconnect." }
+function Connect-SecureM365Graph { [CmdletBinding()] param([guid] $TenantId, [switch] $UseDeviceCode) throw "Unmocked Graph connection." }
+function Test-SecureM365ScoreAction { [CmdletBinding()] param([string] $Title, [string] $ControlName) throw "Unmocked score read." }
 function Get-CsTeamsMeetingPolicy {
     [CmdletBinding()]
     param([string] $Identity)
@@ -70,45 +71,45 @@ function Get-CsTeamsMeetingPolicy {
 }
 function Set-CsTeamsMeetingPolicy {
     [CmdletBinding()]
-    param([string] $Identity, [string] $AutoAdmittedUsers, [string] $DesignatedPresenterRoleMode, [bool] $AllowAnonymousUsersToJoinMeeting)
+    param(
+        [string] $Identity,
+        [string] $AutoAdmittedUsers,
+        [string] $DesignatedPresenterRoleMode,
+        [bool] $AllowAnonymousUsersToJoinMeeting
+    )
     throw "Unmocked meeting policy update."
 }
-function Invoke-PolicyScript {
+
+function Invoke-TeamsScript {
     param([string] $File, [hashtable] $Parameters = @{})
     $ErrorActionPreference = "Stop"
-    & $script:policyScripts[$File] -TenantId ([guid] $script:fixture.TenantId) -Confirm:$false @Parameters
+    if ($File -in @($script:mutatorCases.File)) {
+        & $script:scriptBlocks[$File] -TenantId ([guid] $script:fixture.TenantId) -Confirm:$false @Parameters
+    }
+    else {
+        & $script:scriptBlocks[$File] -TenantId ([guid] $script:fixture.TenantId) @Parameters
+    }
 }
 
-Describe "Teams meeting policy target selection (offline)" {
+Describe "Global Teams meeting policy scope (offline)" {
     BeforeEach {
         $script:fixture = @{
             TenantId = "11111111-1111-4111-8111-111111111111"
-            Policies = @(
-                foreach ($identity in @(
-                    "Global", "Tag:LabMeetings", "Tag:ExternalMeetings", "Tag:InternalMeetings",
-                    "Tag:Training", "Tag:Events", "Tag:KioskCustom"
-                )) {
-                    [pscustomobject]@{
-                        Identity = $identity
-                        AutoAdmittedUsers = "Everyone"
-                        DesignatedPresenterRoleMode = "EveryoneUserOverride"
-                        AllowAnonymousUsersToJoinMeeting = $true
-                    }
-                }
-            )
+            Global = [pscustomobject]@{
+                Identity = "Global"
+                AutoAdmittedUsers = "Everyone"
+                DesignatedPresenterRoleMode = "EveryoneUserOverride"
+                AllowAnonymousUsersToJoinMeeting = $true
+            }
+            ResponseMode = "Global"
             Reads = [System.Collections.Generic.List[string]]::new()
             Writes = [System.Collections.Generic.List[object]]::new()
-            Attempts = [System.Collections.Generic.List[string]]::new()
             Connections = 0
-            Disconnected = $false
+            GraphConnections = 0
+            ScoreReads = 0
             DeviceAuthentication = $false
             ApplicationId = $null
             CertificateThumbprint = $null
-            WrongTenant = $false
-            FailEnumeration = $false
-            RejectIdentity = $null
-            RejectError = $null
-            WrongReadIdentity = $false
         }
         Mock Connect-MicrosoftTeams {
             param($TenantId, $UseDeviceAuthentication, $ApplicationId, $CertificateThumbprint, $Certificate)
@@ -116,295 +117,170 @@ Describe "Teams meeting policy target selection (offline)" {
             $script:fixture.DeviceAuthentication = [bool] $UseDeviceAuthentication
             $script:fixture.ApplicationId = [string] $ApplicationId
             $script:fixture.CertificateThumbprint = [string] $CertificateThumbprint
-            [pscustomobject]@{
-                TenantId = if ($script:fixture.WrongTenant) { "22222222-2222-4222-8222-222222222222" } else { $TenantId }
-                Account = "lab-admin@example.com"
-            }
+            [pscustomobject]@{ TenantId = $TenantId; Account = "lab-admin@example.com" }
         }
-        Mock Disconnect-MicrosoftTeams { $script:fixture.Disconnected = $true }
+        Mock Disconnect-MicrosoftTeams {}
+        Mock Connect-SecureM365Graph {
+            $script:fixture.GraphConnections++
+            [pscustomobject]@{ TenantId = $script:fixture.TenantId; Environment = "Global" }
+        }
+        Mock Test-SecureM365ScoreAction { [void] $script:fixture.ScoreReads++ }
         Mock Get-CsTeamsMeetingPolicy {
             param($Identity)
             [void] $script:fixture.Reads.Add([string] $Identity)
-            if (-not $Identity) {
-                if ($script:fixture.FailEnumeration) { throw "Meeting policy enumeration failed." }
-                $script:fixture.Policies | ForEach-Object { $_.PSObject.Copy() }
-            }
-            else {
-                $canonical = if ($Identity -eq "Global") { "Global" } else { "Tag:" + ($Identity -replace '^Tag:', '') }
-                if ($script:fixture.WrongReadIdentity) { $canonical = "Global" }
-                $script:fixture.Policies |
-                    Where-Object Identity -eq $canonical |
-                    ForEach-Object { $_.PSObject.Copy() }
+            switch ($script:fixture.ResponseMode) {
+                "Zero" { return }
+                "Multiple" {
+                    $script:fixture.Global.PSObject.Copy()
+                    $script:fixture.Global.PSObject.Copy()
+                }
+                "Wrong" {
+                    $wrong = $script:fixture.Global.PSObject.Copy()
+                    $wrong.Identity = "Tag:AllOn"
+                    $wrong
+                }
+                default { $script:fixture.Global.PSObject.Copy() }
             }
         }
         Mock Set-CsTeamsMeetingPolicy {
             param($Identity, $AutoAdmittedUsers, $DesignatedPresenterRoleMode, $AllowAnonymousUsersToJoinMeeting)
-            [void] $script:fixture.Attempts.Add($Identity)
-            if ($Identity -eq $script:fixture.RejectIdentity) {
-                if ($null -ne $script:fixture.RejectError) { throw $script:fixture.RejectError }
-                throw "Teams rejected update to policy '$Identity'."
-            }
+            if ($Identity -ne "Global") { throw "Unexpected update target '$Identity'." }
             $updates = @{}
             if ($null -ne $AutoAdmittedUsers) { $updates.AutoAdmittedUsers = $AutoAdmittedUsers }
             if ($null -ne $DesignatedPresenterRoleMode) { $updates.DesignatedPresenterRoleMode = $DesignatedPresenterRoleMode }
             if ($null -ne $AllowAnonymousUsersToJoinMeeting) { $updates.AllowAnonymousUsersToJoinMeeting = $AllowAnonymousUsersToJoinMeeting }
-            if ($updates.Count -ne 1) { throw "Expected exactly one meeting policy setting per update." }
-            $policy = @($script:fixture.Policies | Where-Object Identity -eq $Identity)
-            if ($policy.Count -ne 1) { throw "Unexpected policy update target '$Identity'." }
+            if ($updates.Count -ne 1) { throw "Expected exactly one setting." }
             foreach ($property in $updates.Keys) {
-                $policy[0].$property = $updates[$property]
-                [void] $script:fixture.Writes.Add(@{ Identity = $Identity; Property = $property; Value = $updates[$property] })
+                $script:fixture.Global.$property = $updates[$property]
+                [void] $script:fixture.Writes.Add([pscustomobject]@{
+                    Identity = $Identity
+                    Property = $property
+                    Value = $updates[$property]
+                })
             }
         }
     }
 
-    It "updates every returned policy by default in <File>" -TestCases $script:policyCases {
+    It "updates only Global and returns read-back evidence in <File>" -TestCases $script:mutatorCases {
         param($File, $Property, $Expected)
-        $result = @(Invoke-PolicyScript $File)
-        $result.Count | Should Be 7
-        $script:fixture.Writes.Count | Should Be 7
-        @($script:fixture.Policies | Where-Object { $_.$Property -ne $Expected }).Count | Should Be 0
-        $script:fixture.Reads[0] | Should Be ""
-        $script:fixture.Reads.Count | Should Be 8
-    }
-
-    It "restricts updates to Global when explicitly selected in <File>" -TestCases $script:policyCases {
-        param($File, $Property, $Expected)
-        $result = @(Invoke-PolicyScript $File @{ PolicyIdentity = @("Global") })
+        $result = @(Invoke-TeamsScript $File)
         $result.Count | Should Be 1
         $result[0].Identity | Should Be "Global"
         $result[0].$Property | Should Be $Expected
         $script:fixture.Writes.Count | Should Be 1
         $script:fixture.Writes[0].Identity | Should Be "Global"
-        @($script:fixture.Policies | Where-Object { $_.$Property -eq $Expected }).Count | Should Be 1
+        ($script:fixture.Reads -join ",") | Should Be "Global,Global"
     }
 
-    It "updates only explicitly selected identities in <File>" -TestCases $script:policyCases {
+    It "keeps WhatIf read-only while returning Global evidence in <File>" -TestCases $script:mutatorCases {
         param($File, $Property, $Expected)
-        $result = @(Invoke-PolicyScript $File @{ PolicyIdentity = @("LabMeetings", "Tag:KioskCustom") })
-        $result.Count | Should Be 2
-        ($script:fixture.Writes.Identity -join ",") | Should Be "Tag:LabMeetings,Tag:KioskCustom"
-        @($result | Where-Object { $_.$Property -ne $Expected }).Count | Should Be 0
-        $script:fixture.Policies[0].$Property | Should Not Be $Expected
-    }
-
-    It "updates every returned policy with AllPolicies in <File>" -TestCases $script:policyCases {
-        param($File, $Property, $Expected)
-        $result = @(Invoke-PolicyScript $File @{ AllPolicies = $true })
-        $result.Count | Should Be 7
-        $script:fixture.Writes.Count | Should Be 7
-        @($script:fixture.Policies | Where-Object { $_.$Property -ne $Expected }).Count | Should Be 0
-        $script:fixture.Reads[0] | Should Be ""
-        $script:fixture.Reads.Count | Should Be 8
-    }
-
-    It "keeps WhatIf read-only for the default all-policy scope in <File>" -TestCases $script:policyCases {
-        param($File, $Property, $Expected)
-        $result = @(Invoke-PolicyScript $File @{ WhatIf = $true })
-        $result.Count | Should Be 7
+        $result = @(Invoke-TeamsScript $File @{ WhatIf = $true })
+        $result.Count | Should Be 1
+        $result[0].Identity | Should Be "Global"
+        $result[0].$Property | Should Not Be $Expected
         $script:fixture.Writes.Count | Should Be 0
-        $script:fixture.Attempts.Count | Should Be 0
-        @($script:fixture.Policies | Where-Object { $_.$Property -eq $Expected }).Count | Should Be 0
+        ($script:fixture.Reads -join ",") | Should Be "Global,Global"
     }
 
-    It "skips compliant policies and is idempotent in <File>" -TestCases $script:policyCases {
+    It "does not rewrite an already compliant Global policy in <File>" -TestCases $script:mutatorCases {
         param($File, $Property, $Expected)
-        $script:fixture.Policies[0].$Property = $Expected
-        $null = Invoke-PolicyScript $File
-        $script:fixture.Writes.Count | Should Be 6
-        $null = Invoke-PolicyScript $File
-        $script:fixture.Writes.Count | Should Be 6
+        $script:fixture.Global.$Property = $Expected
+        $result = @(Invoke-TeamsScript $File)
+        $result[0].Identity | Should Be "Global"
+        $script:fixture.Writes.Count | Should Be 0
     }
 
-    It "rejects conflicting selectors before connecting in <File>" -TestCases $script:policyCases {
+    It "preserves high-impact ShouldProcess in <File>" -TestCases $script:mutatorCases {
         param($File, $Property, $Expected)
-        $caught = $false
-        try {
-            $null = Invoke-PolicyScript $File @{ AllPolicies = $true; PolicyIdentity = @("Global") }
-        }
-        catch {
-            $_.FullyQualifiedErrorId | Should Match "AmbiguousParameterSet"
-            $caught = $true
-        }
-        if (-not $caught) {
-            throw "Conflicting selectors were not rejected. Connections: $($script:fixture.Connections); writes: $($script:fixture.Writes.Count)."
-        }
-        $script:fixture.Connections | Should Be 0
-        $script:fixture.Attempts.Count | Should Be 0
-    }
-
-    It "validates every selected target before writing in <File>" -TestCases $script:policyCases {
-        param($File, $Property, $Expected)
-        { Invoke-PolicyScript $File @{ PolicyIdentity = @("Global", "Missing") } } | Should Throw "requested meeting policy"
-        $script:fixture.Attempts.Count | Should Be 0
-    }
-
-    It "rejects an empty inventory before writing in <File>" -TestCases $script:policyCases {
-        param($File, $Property, $Expected)
-        $script:fixture.Policies = @()
-        { Invoke-PolicyScript $File @{ AllPolicies = $true } } | Should Throw "empty or incomplete"
-        $script:fixture.Attempts.Count | Should Be 0
-    }
-
-    It "requires Global in the all-policy inventory in <File>" -TestCases $script:policyCases {
-        param($File, $Property, $Expected)
-        $script:fixture.Policies = @($script:fixture.Policies | Where-Object Identity -ne "Global")
-        { Invoke-PolicyScript $File @{ AllPolicies = $true } } | Should Throw "Global is required"
-        $script:fixture.Attempts.Count | Should Be 0
-    }
-
-    It "rejects duplicate identities before writing in <File>" -TestCases $script:policyCases {
-        param($File, $Property, $Expected)
-        $script:fixture.Policies += $script:fixture.Policies[0].PSObject.Copy()
-        { Invoke-PolicyScript $File @{ AllPolicies = $true } } | Should Throw "missing or duplicate"
-        $script:fixture.Attempts.Count | Should Be 0
-    }
-
-    It "rejects missing identities before writing in <File>" -TestCases $script:policyCases {
-        param($File, $Property, $Expected)
-        $script:fixture.Policies[-1].Identity = ""
-        { Invoke-PolicyScript $File @{ AllPolicies = $true } } | Should Throw "missing or duplicate"
-        $script:fixture.Attempts.Count | Should Be 0
-    }
-
-    It "surfaces inventory errors without partial updates in <File>" -TestCases $script:policyCases {
-        param($File, $Property, $Expected)
-        $script:fixture.FailEnumeration = $true
-        { Invoke-PolicyScript $File @{ AllPolicies = $true } } | Should Throw "enumeration failed"
-        $script:fixture.Attempts.Count | Should Be 0
-    }
-
-    It "stops on a rejected policy without silently skipping it in <File>" -TestCases $script:policyCases {
-        param($File, $Property, $Expected)
-        $script:fixture.RejectIdentity = "Tag:LabMeetings"
-        { Invoke-PolicyScript $File @{ AllPolicies = $true } } | Should Throw "Teams rejected update"
-        $script:fixture.Attempts.Count | Should Be 2
-        $script:fixture.Writes.Count | Should Be 1
-        $script:fixture.Policies[0].$Property | Should Be $Expected
-        $script:fixture.Policies[1].$Property | Should Not Be $Expected
-    }
-
-    It "stops with read-only policy guidance in <File> for an <ErrorSource> rejection" -TestCases $script:readOnlyCases {
-        param($File, $Property, $Expected, $ErrorSource)
-        $script:fixture.Policies[1].Identity = "Tag:AllOn"
-        $script:fixture.RejectIdentity = "Tag:AllOn"
-        $rejection = "Invalid input parameters Tenant Admin can't modify first party documents Please check your request parameters. CorrelationId: fixture-correlation"
-        $message = if ($ErrorSource -eq "Exception") { $rejection } else { "Invalid input parameters." }
-        $original = [System.Management.Automation.ErrorRecord]::new(
-            [System.InvalidOperationException]::new($message),
-            "TeamsFirstPartyDocument",
-            [System.Management.Automation.ErrorCategory]::InvalidArgument,
-            "Tag:AllOn"
-        )
-        if ($ErrorSource -eq "ErrorDetails") {
-            $original.ErrorDetails = [System.Management.Automation.ErrorDetails]::new(
-                (@{ message = $rejection } | ConvertTo-Json -Compress)
-            )
-        }
-        $script:fixture.RejectError = $original
-        $caught = $null
-        try { $null = Invoke-PolicyScript $File } catch { $caught = $_ }
-        if ($null -eq $caught) { throw "The read-only policy rejection did not stop execution." }
-        $caught.FullyQualifiedErrorId | Should Match "SecureM365TeamsReadOnlyPolicy"
-        $caught.TargetObject | Should Be "Tag:AllOn"
-        $caught.Exception.Message | Should Match "Microsoft-managed read-only"
-        $caught.Exception.Message | Should Match "-PolicyIdentity Global"
-        $caught.Exception.Message | Should Match "custom policy"
-        $caught.Exception.Message | Should Match "not rolled back"
-        $caught.Exception.Message | Should Match "fixture-correlation"
-        $caught.Exception.InnerException.Message | Should Be $original.Exception.Message
-        ($script:fixture.Attempts -join ",") | Should Be "Global,Tag:AllOn"
-        $script:fixture.Writes.Count | Should Be 1
-        $script:fixture.Policies[0].$Property | Should Be $Expected
-        @($script:fixture.Policies | Select-Object -Skip 1 | Where-Object { $_.$Property -eq $Expected }).Count | Should Be 0
-
-        $readFailures = @{}
-        $data = @{ Teams = $script:fixture.Policies }
-        $assessment = Get-TeamsAssessment -Property $Property -Expected $Expected
-        $assessment.Status | Should Be "NOT-CONFIGURED"
-        $assessment.Details | Should Match "Tag:AllOn"
-        $assessment.Details | Should Match "read-only"
-    }
-
-    It "preserves ordinary access-denied errors in <File> without misclassifying them" -TestCases $script:policyCases {
-        param($File, $Property, $Expected)
-        $script:fixture.RejectIdentity = "Tag:LabMeetings"
-        $original = [System.Management.Automation.ErrorRecord]::new(
-            [System.UnauthorizedAccessException]::new("Forbidden: Access Denied."),
-            "TeamsAccessDenied",
-            [System.Management.Automation.ErrorCategory]::PermissionDenied,
-            "Tag:LabMeetings"
-        )
-        $original.ErrorDetails = [System.Management.Automation.ErrorDetails]::new('{"code":"Forbidden","message":"Request access."}')
-        $script:fixture.RejectError = $original
-        $caught = $null
-        try { $null = Invoke-PolicyScript $File } catch { $caught = $_ }
-        if ($null -eq $caught) { throw "The access-denied error did not stop execution." }
-        $caught.FullyQualifiedErrorId | Should Match "TeamsAccessDenied"
-        $caught.Exception.Message | Should Be $original.Exception.Message
-        $caught.ErrorDetails.Message | Should Be $original.ErrorDetails.Message
-        $caught.TargetObject | Should Be "Tag:LabMeetings"
-        $script:fixture.Attempts.Count | Should Be 2
-        $script:fixture.Writes.Count | Should Be 1
-    }
-
-    It "retains the tenant guard in <File>" -TestCases $script:policyCases {
-        param($File, $Property, $Expected)
-        $script:fixture.WrongTenant = $true
-        { Invoke-PolicyScript $File @{ AllPolicies = $true } } | Should Throw "instead of"
-        $script:fixture.Disconnected | Should Be $true
-        $script:fixture.Reads.Count | Should Be 0
-        $script:fixture.Attempts.Count | Should Be 0
-    }
-
-    It "preserves device authentication and high-impact confirmations in <File>" -TestCases $script:policyCases {
-        param($File, $Property, $Expected)
-        $null = Invoke-PolicyScript $File @{ AllPolicies = $true; UseDeviceAuthentication = $true }
-        $script:fixture.DeviceAuthentication | Should Be $true
-        $binding = $script:policySources[$File].ParamBlock.Attributes | Where-Object { $_.TypeName.Name -eq "CmdletBinding" }
+        $binding = $script:scriptSources[$File].ParamBlock.Attributes |
+            Where-Object { $_.TypeName.Name -eq "CmdletBinding" }
         ($binding.NamedArguments | Where-Object ArgumentName -eq "SupportsShouldProcess").Argument.SafeGetValue() | Should Be $true
         ($binding.NamedArguments | Where-Object ArgumentName -eq "ConfirmImpact").Argument.SafeGetValue() | Should Be "High"
     }
 
-    It "routes certificate application authentication in <File>" -TestCases $script:policyCases {
+    It "returns clear Global evidence from <File>" -TestCases $script:validatorCases {
+        param($File, $Property, $Expected)
+        $script:fixture.Global.$Property = $Expected
+        $result = @(Invoke-TeamsScript $File)
+        $evidence = @($result | Where-Object { $_.PSObject.Properties.Name -contains "PolicyIdentity" })[0]
+        $evidence.PolicyIdentity | Should Be "Global"
+        $evidence.ActualValue | Should Be $Expected
+        $evidence.ExpectedValue | Should Be $Expected
+        $evidence.Resolved | Should Be $true
+        ($script:fixture.Reads -join ",") | Should Be "Global"
+    }
+
+    It "reports noncompliant Global evidence from <File>" -TestCases $script:validatorCases {
+        param($File, $Property, $Expected)
+        $result = @(Invoke-TeamsScript $File)
+        $evidence = @($result | Where-Object { $_.PSObject.Properties.Name -contains "PolicyIdentity" })[0]
+        $evidence.PolicyIdentity | Should Be "Global"
+        $evidence.Resolved | Should Be $false
+    }
+
+    It "fails before writes when Global retrieval returns zero policies in <File>" -TestCases $script:allScriptCases {
+        param($File, $Property, $Expected)
+        $script:fixture.ResponseMode = "Zero"
+        { Invoke-TeamsScript $File } | Should Throw "exactly one Global"
+        $script:fixture.Writes.Count | Should Be 0
+    }
+
+    It "fails before writes when Global retrieval returns multiple policies in <File>" -TestCases $script:allScriptCases {
+        param($File, $Property, $Expected)
+        $script:fixture.ResponseMode = "Multiple"
+        { Invoke-TeamsScript $File } | Should Throw "returned 2"
+        $script:fixture.Writes.Count | Should Be 0
+    }
+
+    It "fails before writes when Global retrieval returns the wrong identity in <File>" -TestCases $script:allScriptCases {
+        param($File, $Property, $Expected)
+        $script:fixture.ResponseMode = "Wrong"
+        { Invoke-TeamsScript $File } | Should Throw "when Global was requested"
+        $script:fixture.Writes.Count | Should Be 0
+    }
+
+    It "routes certificate application authentication in <File>" -TestCases $script:allScriptCases {
         param($File, $Property, $Expected)
         $appId = "55555555-5555-4555-8555-555555555555"
         $thumbprint = "0123456789ABCDEF0123456789ABCDEF01234567"
-
-        $null = Invoke-PolicyScript $File @{
-            AllPolicies = $true
+        $null = Invoke-TeamsScript $File @{
             TeamsApplicationId = [guid] $appId
             TeamsCertificateThumbprint = $thumbprint
         }
-
         $script:fixture.ApplicationId | Should Be $appId
         $script:fixture.CertificateThumbprint | Should Be $thumbprint
         $script:fixture.DeviceAuthentication | Should Be $false
     }
 
-    It "rejects a response for a different selected policy in <File>" -TestCases $script:policyCases {
-        param($File, $Property, $Expected)
-        $script:fixture.WrongReadIdentity = $true
-        { Invoke-PolicyScript $File @{ PolicyIdentity = @("LabMeetings") } } | Should Throw "requested meeting policy"
-        $script:fixture.Attempts.Count | Should Be 0
+    It "ignores Tag policies when retrieving and assessing Global" {
+        $tagPolicy = [pscustomobject]@{
+            Identity = "Tag:AllOn"
+            AutoAdmittedUsers = "Everyone"
+            DesignatedPresenterRoleMode = "EveryoneUserOverride"
+            AllowAnonymousUsersToJoinMeeting = $true
+        }
+        $data = @{ Teams = @($script:fixture.Global, $tagPolicy)[0] }
+        $readFailures = @{}
+        $script:fixture.Global.AutoAdmittedUsers = "InvitedUsers"
+        $assessment = Get-TeamsAssessment -Property AutoAdmittedUsers -Expected "InvitedUsers"
+        $assessment.Status | Should Be "IMPLEMENTED"
+        $assessment.Details | Should Match "Global"
+        $assessment.Details | Should Not Match "Tag:"
     }
 
-    It "keeps script 99's all-policy audit and passes it when every policy is editable and updated" {
-        foreach ($case in $script:policyCases) {
-            $null = Invoke-PolicyScript $case.File @{ PolicyIdentity = @("Global") }
-        }
+    It "reports script 99 evidence identifying Global" {
+        $data = @{ Teams = $script:fixture.Global }
         $readFailures = @{}
-        $data = @{ Teams = $script:fixture.Policies }
-        foreach ($case in $script:policyCases) {
-            $assessment = Get-TeamsAssessment -Property $case.Property -Expected $case.Expected
-            $assessment.Status | Should Be "NOT-CONFIGURED"
-            $assessment.Details | Should Match "Tag:LabMeetings"
-        }
-        foreach ($case in $script:policyCases) {
-            $null = Invoke-PolicyScript $case.File
-            $assessment = Get-TeamsAssessment -Property $case.Property -Expected $case.Expected
-            $assessment.Status | Should Be "IMPLEMENTED"
-        }
+        $assessment = Get-TeamsAssessment -Property AutoAdmittedUsers -Expected "InvitedUsers"
+        $assessment.Status | Should Be "NOT-CONFIGURED"
+        $assessment.Details | Should Match "Global"
+        $assessment.Details | Should Match "Everyone"
+    }
+
+    It "uses the exact Global helper in script 99 without an inventory read" {
+        $sourceText = Get-Content -LiteralPath (Join-Path $scriptsRoot "99-Test-M365RecommendationStatus.ps1") -Raw
+        $sourceText | Should Match "Get-SecureM365TeamsMeetingPolicy"
+        $sourceText | Should Not Match "Get-CsTeamsMeetingPolicy\s+-ErrorAction"
     }
 
     It "never falls back to delegated authentication when certificate application auth is incomplete" {
@@ -414,27 +290,5 @@ Describe "Teams meeting policy target selection (offline)" {
                 -ApplicationId "55555555-5555-4555-8555-555555555555"
         } | Should Throw "exactly one"
         $script:fixture.Connections | Should Be 0
-    }
-
-    It "rejects device authentication combined with certificate application auth before connecting" {
-        {
-            Connect-SecureM365Teams `
-                -TenantId ([guid] $script:fixture.TenantId) `
-                -ApplicationId "55555555-5555-4555-8555-555555555555" `
-                -CertificateThumbprint "0123456789ABCDEF0123456789ABCDEF01234567" `
-                -UseDeviceAuthentication
-        } | Should Throw "cannot be combined"
-        $script:fixture.Connections | Should Be 0
-    }
-
-    It "disconnects and rejects a tenant mismatch for certificate application auth" {
-        $script:fixture.WrongTenant = $true
-        {
-            Connect-SecureM365Teams `
-                -TenantId ([guid] $script:fixture.TenantId) `
-                -ApplicationId "55555555-5555-4555-8555-555555555555" `
-                -CertificateThumbprint "0123456789ABCDEF0123456789ABCDEF01234567"
-        } | Should Throw "instead of"
-        $script:fixture.Disconnected | Should Be $true
     }
 }

@@ -1,6 +1,16 @@
 #Requires -Version 7.2
 #Requires -Modules Microsoft.Graph.Authentication, MicrosoftTeams
 
+<#
+.SYNOPSIS
+Tests anonymous meeting join on the Global Teams meeting policy.
+
+.DESCRIPTION
+Assesses only the org-wide Global meeting policy. Custom meeting policies and
+their user/group assignments require separate review and are outside this check.
+The script fails if Teams does not return exactly the Global policy.
+#>
+
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
@@ -30,15 +40,14 @@ Connect-SecureM365Teams `
     -CertificatePassword $TeamsCertificatePassword |
     Out-Null
 
-$nonCompliantPolicies = @(
-    Get-CsTeamsMeetingPolicy -ErrorAction Stop |
-    Where-Object { $_.AllowAnonymousUsersToJoinMeeting -ne $false }
-)
+$policy = Get-SecureM365TeamsMeetingPolicy
 
 [pscustomobject]@{
-    Control              = "Block anonymous meeting join"
-    NonCompliantPolicies = @($nonCompliantPolicies.Identity)
-    Resolved             = $nonCompliantPolicies.Count -eq 0
+    Control        = "Block anonymous meeting join"
+    PolicyIdentity = $policy.Identity
+    ActualValue    = $policy.AllowAnonymousUsersToJoinMeeting
+    ExpectedValue  = $false
+    Resolved       = $policy.AllowAnonymousUsersToJoinMeeting -eq $false
 }
 
 Test-SecureM365ScoreAction `

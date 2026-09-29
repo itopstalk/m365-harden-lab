@@ -1,6 +1,16 @@
 #Requires -Version 7.2
 #Requires -Modules Microsoft.Graph.Authentication, MicrosoftTeams
 
+<#
+.SYNOPSIS
+Tests the default presenter role on the Global Teams meeting policy.
+
+.DESCRIPTION
+Assesses only the org-wide Global meeting policy. Custom meeting policies and
+their user/group assignments require separate review and are outside this check.
+The script fails if Teams does not return exactly the Global policy.
+#>
+
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
@@ -30,17 +40,14 @@ Connect-SecureM365Teams `
     -CertificatePassword $TeamsCertificatePassword |
     Out-Null
 
-$nonCompliantPolicies = @(
-    Get-CsTeamsMeetingPolicy -ErrorAction Stop |
-    Where-Object {
-        $_.DesignatedPresenterRoleMode -ne "OrganizerOnlyUserOverride"
-    }
-)
+$policy = Get-SecureM365TeamsMeetingPolicy
 
 [pscustomobject]@{
-    Control              = "Limit default presenters"
-    NonCompliantPolicies = @($nonCompliantPolicies.Identity)
-    Resolved             = $nonCompliantPolicies.Count -eq 0
+    Control        = "Limit default presenters"
+    PolicyIdentity = $policy.Identity
+    ActualValue    = $policy.DesignatedPresenterRoleMode
+    ExpectedValue  = "OrganizerOnlyUserOverride"
+    Resolved       = $policy.DesignatedPresenterRoleMode -eq "OrganizerOnlyUserOverride"
 }
 
 Test-SecureM365ScoreAction `

@@ -6,25 +6,12 @@
 Disables anonymous meeting join in Teams meeting policies.
 
 .DESCRIPTION
-Attempts to update Global and every returned meeting policy by default, including
-predefined and unused policies. Only Global and tenant-created custom policies
-are editable; Microsoft-managed presets are read-only. Use -PolicyIdentity Global
-or explicitly select tenant-created policies to avoid targeting those presets.
-Script 99 still audits all policies, including read-only and unused presets.
-The full target inventory is checked before the first update. Policy assignments
-are not changed. Review -WhatIf output first; shared policy changes affect users
-assigned to them. If Teams rejects an update, the script stops without rolling
-back earlier changes. The first-party read-only rejection includes guidance;
-no policy is skipped or retried, and other errors retain their original details.
-WhatIf previews targets but cannot verify whether Teams will allow an update.
-
-.PARAMETER PolicyIdentity
-Restrict updates to these policies. If omitted, all policies are targeted.
-Cannot be combined with -AllPolicies.
-
-.PARAMETER AllPolicies
-Optional compatibility switch; all policies are already the default.
-Use -PolicyIdentity Global to restrict updates to Global.
+Updates only the org-wide Global meeting policy. The lab intentionally does not
+assess or configure custom meeting policies or their user/group assignments;
+review those separately. Policy assignments are not changed. Review -WhatIf
+output first because Global affects users who do not have a custom policy
+assignment. The script verifies the exact Global identity before any write and
+reads it back afterward.
 
 .PARAMETER TeamsApplicationId
 Use the dedicated Teams application instead of delegated authentication.
@@ -43,21 +30,12 @@ with TeamsCertificatePassword when needed.
 .EXAMPLE
 .\44-Disable-TeamsAnonymousMeetingJoin.ps1 -TenantId $TenantId
 
-.EXAMPLE
-.\44-Disable-TeamsAnonymousMeetingJoin.ps1 -TenantId $TenantId -PolicyIdentity Global
 #>
 
-[CmdletBinding(SupportsShouldProcess, ConfirmImpact = "High", DefaultParameterSetName = "AllPolicies")]
+[CmdletBinding(SupportsShouldProcess, ConfirmImpact = "High")]
 param(
     [Parameter(Mandatory)]
     [guid] $TenantId,
-
-    [Parameter(Mandatory, ParameterSetName = "SelectedPolicies")]
-    [ValidateNotNullOrEmpty()]
-    [string[]] $PolicyIdentity,
-
-    [Parameter(ParameterSetName = "AllPolicies")]
-    [switch] $AllPolicies,
 
     [switch] $UseDeviceAuthentication,
     [guid] $TeamsApplicationId,
@@ -78,30 +56,21 @@ Connect-SecureM365Teams `
     -CertificatePassword $TeamsCertificatePassword |
     Out-Null
 
-$selection = if ($PSCmdlet.ParameterSetName -eq "SelectedPolicies") {
-    @{ PolicyIdentity = $PolicyIdentity }
-}
-else {
-    @{ AllPolicies = $true }
-}
-$policies = @(Get-SecureM365TeamsMeetingPolicy @selection)
-foreach ($policy in $policies) {
-    $identity = [string] $policy.Identity
-    if ($policy.AllowAnonymousUsersToJoinMeeting -ne $false) {
-        if ($PSCmdlet.ShouldProcess($identity, "Disable anonymous meeting join")) {
-            try {
-                Set-CsTeamsMeetingPolicy `
-                    -Identity $identity `
-                    -AllowAnonymousUsersToJoinMeeting $false `
-                    -ErrorAction Stop
-            }
-            catch {
-                $errorRecord = Get-SecureM365TeamsMeetingPolicyUpdateError -PolicyIdentity $identity -ErrorRecord $_
-                $PSCmdlet.ThrowTerminatingError($errorRecord)
-            }
+$policy = Get-SecureM365TeamsMeetingPolicy
+if ($policy.AllowAnonymousUsersToJoinMeeting -ne $false) {
+    if ($PSCmdlet.ShouldProcess("Global", "Disable anonymous meeting join")) {
+        try {
+            Set-CsTeamsMeetingPolicy `
+                -Identity Global `
+                -AllowAnonymousUsersToJoinMeeting $false `
+                -ErrorAction Stop
+        }
+        catch {
+            $errorRecord = Get-SecureM365TeamsMeetingPolicyUpdateError -PolicyIdentity Global -ErrorRecord $_
+            $PSCmdlet.ThrowTerminatingError($errorRecord)
         }
     }
-
-    Get-CsTeamsMeetingPolicy -Identity $identity -ErrorAction Stop |
-        Select-Object Identity, AllowAnonymousUsersToJoinMeeting
 }
+
+Get-SecureM365TeamsMeetingPolicy |
+    Select-Object Identity, AllowAnonymousUsersToJoinMeeting
