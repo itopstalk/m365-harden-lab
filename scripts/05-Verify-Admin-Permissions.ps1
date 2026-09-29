@@ -32,8 +32,10 @@ from the current token, which does not necessarily mean admin consent is absent.
 
 Read probes do not modify policies or create test users. Write access is inferred
 from documented roles and token scopes, not tested by changing configuration.
-Licenses (including Entra P1/P2 for relevant features), provisioning, Conditional
-Access, and each script's inputs and safeguards can still prevent execution.
+The Teams preflight reads tenant subscriptions plus the signed-in user's license
+details and assigned plans before any Teams authentication attempt. Other licenses
+(including Entra P1/P2 for relevant features), provisioning, Conditional Access,
+and each script's inputs and safeguards can still prevent execution.
 Script 60 opens the SSPR Properties page; User Administrator covers that setting,
 so Authentication Policy Administrator is not added just for opening that page.
 
@@ -61,6 +63,12 @@ normal or device-code prompts are not displayed.
 
 .PARAMETER UseTeamsDeviceAuthentication
 Use device authentication for Microsoft Teams.
+
+.PARAMETER AttemptTeamsConnection
+Attempt delegated Teams authentication and read the Global meeting policy even
+when -UseGraphBrowserPkce is selected. Use only in a PowerShell host where the
+Teams sign-in UI is visible. This does not override the Security Defaults guard
+against Teams device authentication.
 
 .EXAMPLE
 .\05-Verify-Admin-Permissions.ps1 -TenantId $TenantId -CheckOnly
@@ -97,7 +105,8 @@ param(
     [switch] $CheckOnly,
     [switch] $UseGraphDeviceCode,
     [switch] $UseGraphBrowserPkce,
-    [switch] $UseTeamsDeviceAuthentication
+    [switch] $UseTeamsDeviceAuthentication,
+    [switch] $AttemptTeamsConnection
 )
 
 $ErrorActionPreference = "Stop"
@@ -181,6 +190,7 @@ $requiredScopes = @(
     "RoleManagement.Read.Directory"
     "RoleManagement.ReadWrite.Directory"
     "SecurityEvents.Read.All"
+    "LicenseAssignment.Read.All"
     "User.Create"
     "User.Read.All"
 )
@@ -300,7 +310,8 @@ function Get-GraphPermissionCoverage {
 }
 
 $script:graphContext = Connect-SecureM365Graph -TenantId $TenantId `
-    -AdditionalScopes "Directory.Read.All" -UseDeviceCode:$UseGraphDeviceCode `
+    -AdditionalScopes @("Directory.Read.All", "LicenseAssignment.Read.All") `
+    -UseDeviceCode:$UseGraphDeviceCode `
     -UseBrowserPkce:$UseGraphBrowserPkce
 $admin = Get-VerifiedAdminIdentity
 Write-Host "`nChecking $($admin.userPrincipalName) ($($admin.id)) in tenant $($TenantId.Guid)"
@@ -463,6 +474,7 @@ if ($created.Count -gt 0) {
 }
 
 if (-not $blockedReason) {
+    $securityDefaultsEnabled = $null
     $probes = @(
         @{ Name = "Security defaults"; Path = "policies/identitySecurityDefaultsEnforcementPolicy"; Property = "isEnabled" }
         @{ Name = "Conditional Access"; Path = "identity/conditionalAccess/policies"; Property = "value" }
@@ -482,6 +494,12 @@ if (-not $blockedReason) {
             if ($null -eq $response -or $null -eq $response.($probe.Property)) {
                 throw "The response did not contain '$($probe.Property)'."
             }
+            if ($probe.Name -eq "Security defaults") {
+                if ($response.isEnabled -isnot [bool]) {
+                    throw "The response did not contain a Boolean 'isEnabled' value."
+                }
+                $securityDefaultsEnabled = $response.isEnabled
+            }
         }
         catch {
             $status = "FAILED"
@@ -491,43 +509,110 @@ if (-not $blockedReason) {
         [void] $accessChecks.Add([pscustomobject]@{ Service = $probe.Name; Status = $status; Details = $details })
     }
 
-    $teamsStatus = "PASSED"
-    $teamsDetails = "Meeting-policy read access verified using the same account as Microsoft Graph."
+    $teamsPreflight = $null
     try {
-        if (-not ($modules | Where-Object Module -eq "MicrosoftTeams").Installed) {
-            throw "MicrosoftTeams is not installed. Run script 00."
-        }
-        $connection = Connect-SecureM365Teams -TenantId $TenantId -UseDeviceAuthentication:$UseTeamsDeviceAuthentication
-        if ([string]::IsNullOrWhiteSpace([string] $connection.Account)) {
-            throw "Teams did not return the signed-in account; its identity cannot be verified."
-        }
-        if ([string] $connection.Account -ne $admin.userPrincipalName) {
-            $teamsAccount = [uri]::EscapeDataString([string] $connection.Account)
-            $teamsUser = Invoke-MgGraphRequest -Method GET `
-                -Uri "https://graph.microsoft.com/v1.0/users/$teamsAccount`?`$select=id" -ErrorAction Stop
-            if ($teamsUser.id -ne $admin.id) {
-                Disconnect-MicrosoftTeams -ErrorAction Stop | Out-Null
-                throw "Teams signed in as a different account. Reconnect Teams as '$($admin.userPrincipalName)'."
-            }
-        }
-        $policies = @(Get-CsTeamsMeetingPolicy -ErrorAction Stop)
-        if (@($policies | Where-Object Identity -eq "Global").Count -ne 1) {
-            throw "Teams did not return the Global meeting policy."
-        }
+        $teamsPreflight = Get-SecureM365TeamsProvisioningStatus
     }
     catch {
-        $teamsStatus = "FAILED"
-        $teamsDetails = Get-PermissionErrorDetail $_
-        Write-Warning "Teams access failed: $teamsDetails Verify active Teams roles, provisioning, and sign-in; Graph consent does not grant Teams access."
+        $teamsPreflight = [pscustomobject]@{
+            Status = "FAILED"
+            Code = "TEAMS_PREFLIGHT_FAILED"
+            Details = "Teams license/provisioning preflight failed: $(Get-PermissionErrorDetail $_)"
+            TenantTeamsPlanCount = 0
+            TenantReadyPlanCount = 0
+            UserTeamsPlanCount = 0
+            UserReadyPlanCount = 0
+        }
     }
-    [void] $accessChecks.Add([pscustomobject]@{ Service = "Teams meeting policies"; Status = $teamsStatus; Details = $teamsDetails })
+    [void] $accessChecks.Add([pscustomobject]@{
+        Service = "Teams licensing and provisioning"
+        Status = $teamsPreflight.Status
+        Code = $teamsPreflight.Code
+        Details = $teamsPreflight.Details
+        TenantTeamsPlanCount = $teamsPreflight.TenantTeamsPlanCount
+        TenantReadyPlanCount = $teamsPreflight.TenantReadyPlanCount
+        UserTeamsPlanCount = $teamsPreflight.UserTeamsPlanCount
+        UserReadyPlanCount = $teamsPreflight.UserReadyPlanCount
+    })
+    if ($teamsPreflight.Status -ne "PASSED") {
+        Write-Warning $teamsPreflight.Details
+    }
+
+    $teamsStatus = "BLOCKED"
+    $teamsCode = "TEAMS_CONNECTION_NOT_ATTEMPTED"
+    $teamsDetails = "Teams licensing is present, but delegated meeting-policy access was not validated."
+    if ($teamsPreflight.Status -eq "PASSED") {
+        $blockCopilotConnection = $UseGraphBrowserPkce -and -not $AttemptTeamsConnection
+        $blockDeviceForSecurityDefaults =
+            $UseGraphBrowserPkce -and $UseTeamsDeviceAuthentication -and $securityDefaultsEnabled -eq $true
+        if ($blockDeviceForSecurityDefaults) {
+            $teamsCode = "TEAMS_DEVICE_AUTH_BLOCKED_BY_SECURITY_DEFAULTS"
+            $teamsDetails = "Security Defaults is enabled. Teams device authentication is not attempted in Copilot mode because Entra can block the MS Teams PowerShell Cmdlets app (530035). Validate delegated Teams access from a normal WAM-capable PowerShell host, or separately review certificate-based app authentication. Do not disable Security Defaults merely for this check."
+        }
+        elseif ($blockCopilotConnection) {
+            $teamsCode = if ($securityDefaultsEnabled -eq $true) {
+                "TEAMS_INTERACTIVE_VALIDATION_BLOCKED"
+            }
+            else {
+                "TEAMS_INTERACTIVE_VALIDATION_NOT_ATTEMPTED"
+            }
+            $teamsDetails = "Teams is licensed and provisioned, but Copilot mode does not start the Teams WAM/device sign-in path because it can wait without a visible prompt. Validate delegated Teams access from a normal WAM-capable PowerShell host, or separately review certificate-based app authentication. Do not disable Security Defaults merely for this check."
+        }
+        else {
+            $teamsStatus = "PASSED"
+            $teamsCode = "TEAMS_MEETING_POLICY_ACCESS_VERIFIED"
+            $teamsDetails = "Meeting-policy read access verified using the same account as Microsoft Graph."
+            try {
+                if (-not ($modules | Where-Object Module -eq "MicrosoftTeams").Installed) {
+                    throw "MicrosoftTeams is not installed. Run script 00."
+                }
+                $connection = Connect-SecureM365Teams -TenantId $TenantId -UseDeviceAuthentication:$UseTeamsDeviceAuthentication
+                if ([string]::IsNullOrWhiteSpace([string] $connection.Account)) {
+                    throw "Teams did not return the signed-in account; its identity cannot be verified."
+                }
+                if ([string] $connection.Account -ne $admin.userPrincipalName) {
+                    $teamsAccount = [uri]::EscapeDataString([string] $connection.Account)
+                    $teamsUser = Invoke-MgGraphRequest -Method GET `
+                        -Uri "https://graph.microsoft.com/v1.0/users/$teamsAccount`?`$select=id" -ErrorAction Stop
+                    if ($teamsUser.id -ne $admin.id) {
+                        Disconnect-MicrosoftTeams -ErrorAction Stop | Out-Null
+                        throw "Teams signed in as a different account. Reconnect Teams as '$($admin.userPrincipalName)'."
+                    }
+                }
+                $policies = @(Get-CsTeamsMeetingPolicy -ErrorAction Stop)
+                if (@($policies | Where-Object Identity -eq "Global").Count -ne 1) {
+                    throw "Teams did not return the Global meeting policy."
+                }
+            }
+            catch {
+                $teamsStatus = "FAILED"
+                $teamsCode = "TEAMS_CONNECTION_FAILED"
+                $teamsDetails = Get-PermissionErrorDetail $_
+                Write-Warning "Teams access failed: $teamsDetails Verify active Teams roles, provisioning, and sign-in; Graph consent does not grant Teams access."
+            }
+        }
+    }
+    else {
+        $teamsStatus = "BLOCKED"
+        $teamsCode = "TEAMS_CONNECTION_BLOCKED_BY_PREFLIGHT"
+        $teamsDetails = "Teams authentication was not attempted because the Graph license/provisioning preflight did not pass. $($teamsPreflight.Details)"
+    }
+    [void] $accessChecks.Add([pscustomobject]@{
+        Service = "Teams meeting policies"
+        Status = $teamsStatus
+        Code = $teamsCode
+        Details = $teamsDetails
+    })
+    if ($teamsStatus -eq "BLOCKED") {
+        Write-Warning $teamsDetails
+    }
 }
 
 $missingModules = @($modules | Where-Object { -not $_.Installed } | ForEach-Object { $_.Module })
 $missingScopes = @($graphPermissions | Where-Object Status -eq "NOT IN TOKEN" | ForEach-Object { $_.Scope })
 $ready = -not $blockedReason -and $missingRoles.Count -eq 0 -and $missingScopes.Count -eq 0 -and
     $missingModules.Count -eq 0 -and $created.Count -eq 0 -and
-    $accessChecks.Count -eq 9 -and @($accessChecks | Where-Object Status -ne "PASSED").Count -eq 0
+    $accessChecks.Count -eq 10 -and @($accessChecks | Where-Object Status -ne "PASSED").Count -eq 0
 if ($missingModules.Count -gt 0) {
     Write-Warning "Missing modules: $($missingModules -join ', '). Run script 00; this script does not install tools."
 }

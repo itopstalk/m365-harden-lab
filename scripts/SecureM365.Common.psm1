@@ -474,6 +474,183 @@ function Connect-SecureM365Teams {
     $connection
 }
 
+function Test-SecureM365TeamsServicePlanName {
+    param([AllowNull()][string] $ServicePlanName)
+    $ServicePlanName -match '^(?i:TEAMS|MICROSOFT_TEAMS|MCOIMP|MCOMEETADV|MCOEV|MCOCAP|MESH)'
+}
+
+function Test-SecureM365CoreTeamsServicePlanName {
+    param([AllowNull()][string] $ServicePlanName)
+    $ServicePlanName -match '^(?i:TEAMS(?:\d|_|$))'
+}
+
+function Get-SecureM365TeamsProvisioningStatus {
+    [CmdletBinding()]
+    param()
+
+    $skus = @(Get-SecureM365GraphCollection `
+        -Uri 'https://graph.microsoft.com/v1.0/subscribedSkus?$select=skuId,skuPartNumber,capabilityStatus,servicePlans')
+    foreach ($sku in $skus) {
+        if (
+            [string]::IsNullOrWhiteSpace([string] $sku.skuId) -or
+            [string]::IsNullOrWhiteSpace([string] $sku.skuPartNumber) -or
+            [string]::IsNullOrWhiteSpace([string] $sku.capabilityStatus) -or
+            $null -eq $sku.servicePlans
+        ) {
+            throw "Graph returned an incomplete subscribed SKU inventory."
+        }
+        foreach ($plan in @($sku.servicePlans)) {
+            if (
+                [string]::IsNullOrWhiteSpace([string] $plan.servicePlanId) -or
+                [string]::IsNullOrWhiteSpace([string] $plan.servicePlanName) -or
+                [string]::IsNullOrWhiteSpace([string] $plan.provisioningStatus)
+            ) {
+                throw "Graph returned an incomplete tenant service-plan inventory."
+            }
+        }
+    }
+
+    $tenantTeamsPlans = @(
+        foreach ($sku in $skus) {
+            foreach ($plan in @($sku.servicePlans)) {
+                if (Test-SecureM365TeamsServicePlanName $plan.servicePlanName) {
+                    [pscustomobject]@{
+                        SkuId              = [string] $sku.skuId
+                        SkuPartNumber      = [string] $sku.skuPartNumber
+                        SkuCapabilityStatus = [string] $sku.capabilityStatus
+                        ServicePlanId      = [string] $plan.servicePlanId
+                        ServicePlanName    = [string] $plan.servicePlanName
+                        ProvisioningStatus = [string] $plan.provisioningStatus
+                    }
+                }
+            }
+        }
+    )
+    $enabledTenantTeamsPlans = @(
+        $tenantTeamsPlans | Where-Object {
+            Test-SecureM365CoreTeamsServicePlanName $_.ServicePlanName
+        } | Where-Object {
+            $_.SkuCapabilityStatus -in @("Enabled", "Warning") -and
+            $_.ProvisioningStatus -eq "Success"
+        }
+    )
+    if ($tenantTeamsPlans.Count -eq 0 -or @(
+        $tenantTeamsPlans | Where-Object { $_.SkuCapabilityStatus -in @("Enabled", "Warning") }
+    ).Count -eq 0) {
+        return [pscustomobject]@{
+            Status = "FAILED"
+            Code = "TEAMS_TENANT_ABSENT"
+            Details = "No enabled tenant subscription containing Microsoft Teams service plans was found."
+            TenantTeamsPlanCount = $tenantTeamsPlans.Count
+            TenantReadyPlanCount = 0
+            UserTeamsPlanCount = 0
+            UserReadyPlanCount = 0
+        }
+    }
+    if ($enabledTenantTeamsPlans.Count -eq 0) {
+        return [pscustomobject]@{
+            Status = "FAILED"
+            Code = "TEAMS_TENANT_PLANS_UNAVAILABLE"
+            Details = "The tenant has Microsoft Teams service plans, but none are provisioned successfully."
+            TenantTeamsPlanCount = $tenantTeamsPlans.Count
+            TenantReadyPlanCount = 0
+            UserTeamsPlanCount = 0
+            UserReadyPlanCount = 0
+        }
+    }
+
+    $licenseDetails = @(Get-SecureM365GraphCollection `
+        -Uri 'https://graph.microsoft.com/v1.0/me/licenseDetails?$select=skuId,skuPartNumber,servicePlans')
+    foreach ($license in $licenseDetails) {
+        if (
+            [string]::IsNullOrWhiteSpace([string] $license.skuId) -or
+            [string]::IsNullOrWhiteSpace([string] $license.skuPartNumber) -or
+            $null -eq $license.servicePlans
+        ) {
+            throw "Graph returned an incomplete user license-details inventory."
+        }
+        foreach ($plan in @($license.servicePlans)) {
+            if (
+                [string]::IsNullOrWhiteSpace([string] $plan.servicePlanId) -or
+                [string]::IsNullOrWhiteSpace([string] $plan.servicePlanName) -or
+                [string]::IsNullOrWhiteSpace([string] $plan.provisioningStatus)
+            ) {
+                throw "Graph returned an incomplete user license service-plan inventory."
+            }
+        }
+    }
+
+    $user = Invoke-MgGraphRequest `
+        -Method GET `
+        -Uri 'https://graph.microsoft.com/v1.0/me?$select=id,userPrincipalName,assignedPlans' `
+        -ErrorAction Stop
+    if (
+        [string]::IsNullOrWhiteSpace([string] $user.id) -or
+        [string]::IsNullOrWhiteSpace([string] $user.userPrincipalName) -or
+        $null -eq $user.assignedPlans
+    ) {
+        throw "Graph returned an incomplete signed-in user assigned-plan inventory."
+    }
+    foreach ($plan in @($user.assignedPlans)) {
+        if (
+            [string]::IsNullOrWhiteSpace([string] $plan.servicePlanId) -or
+            [string]::IsNullOrWhiteSpace([string] $plan.service) -or
+            [string]::IsNullOrWhiteSpace([string] $plan.capabilityStatus)
+        ) {
+            throw "Graph returned an incomplete assigned-plan inventory."
+        }
+    }
+
+    $userLicenseTeamsPlans = @(
+        foreach ($license in $licenseDetails) {
+            foreach ($plan in @($license.servicePlans)) {
+                if (Test-SecureM365TeamsServicePlanName $plan.servicePlanName) {
+                    [pscustomobject]@{
+                        SkuPartNumber      = [string] $license.skuPartNumber
+                        ServicePlanId      = [string] $plan.servicePlanId
+                        ServicePlanName    = [string] $plan.servicePlanName
+                        ProvisioningStatus = [string] $plan.provisioningStatus
+                    }
+                }
+            }
+        }
+    )
+    $enabledAssignedPlanIds = @(
+        $user.assignedPlans |
+        Where-Object { $_.capabilityStatus -eq "Enabled" } |
+        ForEach-Object { [string] $_.servicePlanId }
+    )
+    $readyUserTeamsPlans = @(
+        $userLicenseTeamsPlans | Where-Object {
+            Test-SecureM365CoreTeamsServicePlanName $_.ServicePlanName
+        } | Where-Object {
+            $_.ProvisioningStatus -eq "Success" -and
+            $_.ServicePlanId -in $enabledAssignedPlanIds
+        }
+    )
+    if ($userLicenseTeamsPlans.Count -eq 0 -or $readyUserTeamsPlans.Count -eq 0) {
+        return [pscustomobject]@{
+            Status = "FAILED"
+            Code = "TEAMS_USER_UNLICENSED_OR_UNPROVISIONED"
+            Details = "The signed-in administrator has no Microsoft Teams service plan that is both provisioned successfully in licenseDetails and Enabled in assignedPlans."
+            TenantTeamsPlanCount = $tenantTeamsPlans.Count
+            TenantReadyPlanCount = $enabledTenantTeamsPlans.Count
+            UserTeamsPlanCount = $userLicenseTeamsPlans.Count
+            UserReadyPlanCount = $readyUserTeamsPlans.Count
+        }
+    }
+
+    [pscustomobject]@{
+        Status = "PASSED"
+        Code = "TEAMS_LICENSED_AND_PROVISIONED"
+        Details = "Microsoft Teams is licensed for the tenant, and the signed-in administrator has $($readyUserTeamsPlans.Count) provisioned and enabled Teams service plan(s)."
+        TenantTeamsPlanCount = $tenantTeamsPlans.Count
+        TenantReadyPlanCount = $enabledTenantTeamsPlans.Count
+        UserTeamsPlanCount = $userLicenseTeamsPlans.Count
+        UserReadyPlanCount = $readyUserTeamsPlans.Count
+    }
+}
+
 function Get-SecureM365TeamsMeetingPolicy {
     [CmdletBinding(DefaultParameterSetName = "SelectedPolicies")]
     param(
@@ -781,6 +958,7 @@ Export-ModuleMember -Function @(
     "Resolve-SecureM365TenantId"
     "Connect-SecureM365Graph"
     "Connect-SecureM365Teams"
+    "Get-SecureM365TeamsProvisioningStatus"
     "Get-SecureM365TeamsMeetingPolicy"
     "Get-SecureM365TeamsMeetingPolicyUpdateError"
     "Get-SecureM365GraphCollection"
