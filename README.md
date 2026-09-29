@@ -1,5 +1,41 @@
 git clone https://github.com/itopstalk/m365-harden-lab.git
 
+## Connect from the GitHub Copilot App
+
+Run these commands from the `scripts` directory. If `-TenantId` is omitted,
+script 01 prompts for the Microsoft Entra tenant GUID and validates it:
+
+```powershell
+.\00-Install-PowerShellTools.ps1
+.\01-Test-TenantConnections.ps1 -UseGraphBrowserPkce
+```
+
+`-UseGraphBrowserPkce` is designed for Copilot's embedded/managed terminal when
+the normal WAM browser flow or `-UseGraphDeviceCode` waits without displaying a
+prompt. It opens the system browser and uses OAuth authorization code with PKCE,
+a random state and nonce, and a short-lived localhost callback. Enter credentials
+only on Microsoft's page. The scripts never accept a password parameter, read a
+password from `credentials.txt`, or persist access/refresh tokens.
+
+The Microsoft Graph Command Line Tools public client may show a first-run
+delegated-consent page. Review the requested scopes and consent with the intended
+lab account. Admin-restricted scopes can require administrator consent. On
+success, script 01 verifies the tenant, delegated user, and granted scopes. A
+matching process-scoped Graph context is reused; a wrong-tenant or
+insufficient-scope context is never accepted. Subsequent scripts automatically
+return to browser PKCE when that context needs additional scopes. To force the
+same flow in the administrator checker, use:
+
+```powershell
+.\05-Verify-Admin-Permissions.ps1 -TenantId $TenantId -UseGraphBrowserPkce -CheckOnly
+```
+
+Normal `Connect-MgGraph` interactive authentication and
+`-UseGraphDeviceCode` remain available outside managed terminals. Browser PKCE
+times out rather than waiting indefinitely. Local files named `credentials.txt`,
+token files, and `.env` files are ignored by Git; do not put passwords or tokens
+in repository files.
+
 ## Verify the lab administrator
 
 After installing the tools with [script 00](scripts/00-Install-PowerShellTools.ps1)

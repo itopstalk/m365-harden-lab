@@ -1,0 +1,7 @@
+# Local authentication material must never be committed.
+credentials.txt
+*.credentials.txt
+*.token
+*.tokens
+.env
+.env.*
