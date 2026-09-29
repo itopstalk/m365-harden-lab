@@ -108,6 +108,40 @@ The returned report includes `Ready`, `MissingRoles`, `RoleCoverage`,
 `GraphPermissions`, `AccessChecks`, and `AssignmentsCreated`. Use
 `Get-Help .\05-Verify-Admin-Permissions.ps1 -Full` for details and reference links.
 
+## Emergency access account credentials
+
+[Script 04](scripts/04-New-EmergencyAccessAccounts.ps1) generates a different
+48-character cryptographically random password for every requested emergency
+account. It does not prompt for, print, or accept passwords as command-line
+arguments. Before the first tenant write, the script saves and verifies all
+passwords in a JSON artifact protected by Windows user-scoped DPAPI. By default,
+the tenant-specific file is created under the current user's
+`Documents\SecureM365` directory. Use `-PasswordFilePath` to select another
+protected location. An existing file is never replaced unless
+`-OverwritePasswordFile` is explicitly supplied.
+
+`-WhatIf` performs tenant discovery but does not generate passwords or create a
+password file. After a successful run, copy the encrypted artifact to an approved
+protected backup. It can be decrypted only by the same Windows user on the same
+computer. Recover a credential without placing its plaintext on a command line:
+
+```powershell
+$artifact = Get-Content $PasswordFilePath -Raw | ConvertFrom-Json
+$entry = $artifact.accounts |
+    Where-Object userPrincipalName -eq 'emergency-access-01@contoso.onmicrosoft.com'
+$securePassword = ConvertTo-SecureString $entry.encryptedPassword
+$plainPassword = [System.Net.NetworkCredential]::new('', $securePassword).Password
+# Use the password immediately. Then clear the variables and dispose the secure string.
+$plainPassword = $null
+$entry = $null
+$artifact = $null
+$securePassword.Dispose()
+```
+
+The artifact includes its schema version, DPAPI protection type, tenant ID,
+creation time, and each account UPN. Treat the encrypted file as a sensitive
+credential backup even though it contains no plaintext passwords.
+
 ## Conditional Access policy creation mode
 
 Scripts 10, 12, 14, 16, and 18 create new Conditional Access policies as

@@ -8,10 +8,11 @@ Creates cloud-only emergency access accounts with permanent Global Administrator
 .DESCRIPTION
 Uses the tenant's initial, verified, managed onmicrosoft.com domain. Checks every
 requested username before making changes and refuses to modify existing users.
-Prompts securely for distinct passwords of 32-256 printable ASCII characters,
-including at least three character categories, and confirms each password.
-Passwords are not printed or saved. Store them securely before running this script.
-WhatIf performs discovery without requesting write scopes or prompting for passwords.
+Generates distinct 48-character cryptographically random printable passwords with
+all four character categories. Before creating any tenant object, saves each
+password with tenant and UPN metadata in a Windows user-scoped DPAPI-encrypted
+JSON file and verifies that every entry can be recovered. WhatIf performs
+discovery without requesting write scopes, generating passwords, or creating a file.
 
 Creation does not enroll MFA, change Conditional Access or security defaults, or
 configure monitoring. Complete those safeguards before relying on these accounts.
@@ -27,12 +28,29 @@ hyphens, or underscores, starting with a letter or number (maximum 64 characters
 .PARAMETER UseDeviceCode
 Use device-code authentication instead of interactive browser authentication.
 
+.PARAMETER PasswordFilePath
+Path for the DPAPI-encrypted credential artifact. The default is a tenant-specific
+file under Documents\SecureM365. The file can be decrypted only by the same
+Windows user on the same computer.
+
+.PARAMETER OverwritePasswordFile
+Explicitly replace an existing password file. Without this switch, the script
+refuses to overwrite the path.
+
 .EXAMPLE
 .\04-New-EmergencyAccessAccounts.ps1 -TenantId $TenantId -WhatIf
 
 .EXAMPLE
 $accounts = @(.\04-New-EmergencyAccessAccounts.ps1 -TenantId $TenantId)
 $accounts | Select-Object Id, UserPrincipalName, RoleAssignmentId
+
+.EXAMPLE
+$artifact = Get-Content "$HOME\Documents\SecureM365\EmergencyAccessPasswords-$TenantId.json" -Raw |
+    ConvertFrom-Json
+$credential = $artifact.accounts[0]
+$securePassword = ConvertTo-SecureString $credential.encryptedPassword
+$plainPassword = [System.Net.NetworkCredential]::new("", $securePassword).Password
+# Use the password, then clear the variables and dispose the secure string.
 #>
 
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = "High")]
@@ -47,7 +65,11 @@ param(
         "emergency-access-02"
     ),
 
-    [switch] $UseDeviceCode
+    [switch] $UseDeviceCode,
+
+    [string] $PasswordFilePath,
+
+    [switch] $OverwritePasswordFile
 )
 
 $ErrorActionPreference = "Stop"
@@ -57,6 +79,178 @@ if ($TenantId -eq [guid]::Empty) {
 }
 if (@($AccountName | Sort-Object -Unique).Count -ne $AccountName.Count) {
     throw "Supply at least two distinct account names; names are not case-sensitive."
+}
+if (-not $IsWindows) {
+    throw "This script requires Windows because emergency passwords are protected with Windows user-scoped DPAPI."
+}
+if ([string]::IsNullOrWhiteSpace($PasswordFilePath)) {
+    $documentsPath = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyDocuments)
+    if ([string]::IsNullOrWhiteSpace($documentsPath)) {
+        throw "Could not resolve the current user's Documents folder. Supply PasswordFilePath explicitly."
+    }
+    $PasswordFilePath = Join-Path `
+        (Join-Path $documentsPath "SecureM365") `
+        "EmergencyAccessPasswords-$($TenantId.Guid).json"
+}
+$PasswordFilePath = [IO.Path]::GetFullPath($PasswordFilePath)
+
+function Get-SecurePasswordFingerprint {
+    param(
+        [Parameter(Mandatory)]
+        [securestring] $SecurePassword
+    )
+
+    $plainPassword = $null
+    $passwordBytes = $null
+    try {
+        $plainPassword = [System.Net.NetworkCredential]::new("", $SecurePassword).Password
+        $passwordBytes = [Text.Encoding]::UTF8.GetBytes($plainPassword)
+        [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($passwordBytes))
+    }
+    finally {
+        if ($null -ne $passwordBytes) {
+            [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
+        }
+        $plainPassword = $null
+    }
+}
+
+function New-EmergencyPassword {
+    [OutputType([securestring])]
+    param()
+
+    [string[]] $categories = @(
+        "abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "0123456789"
+        "!#$%&()*+,-./:;<=>?@[]^_{|}~"
+    )
+    $allCharacters = [char[]] (($categories | ForEach-Object { -join $_ }) -join "")
+    $characters = [char[]]::new(48)
+    try {
+        for ($index = 0; $index -lt $categories.Count; $index++) {
+            $characters[$index] = $categories[$index][
+                [Security.Cryptography.RandomNumberGenerator]::GetInt32($categories[$index].Count)
+            ]
+        }
+        for ($index = $categories.Count; $index -lt $characters.Count; $index++) {
+            $characters[$index] = $allCharacters[
+                [Security.Cryptography.RandomNumberGenerator]::GetInt32($allCharacters.Count)
+            ]
+        }
+        for ($index = $characters.Count - 1; $index -gt 0; $index--) {
+            $swapIndex = [Security.Cryptography.RandomNumberGenerator]::GetInt32($index + 1)
+            ($characters[$index], $characters[$swapIndex]) = (
+                $characters[$swapIndex], $characters[$index]
+            )
+        }
+
+        $securePassword = [securestring]::new()
+        foreach ($character in $characters) {
+            $securePassword.AppendChar($character)
+        }
+        $securePassword.MakeReadOnly()
+        $securePassword
+    }
+    finally {
+        [Array]::Clear($characters, 0, $characters.Length)
+        [Array]::Clear($allCharacters, 0, $allCharacters.Length)
+    }
+}
+
+function Save-EmergencyPasswordArtifact {
+    param(
+        [Parameter(Mandatory)]
+        [guid] $ArtifactTenantId,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary] $Passwords,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary] $Fingerprints,
+
+        [Parameter(Mandatory)]
+        [string] $Path,
+
+        [switch] $Overwrite
+    )
+
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        throw "PasswordFilePath '$Path' is a directory. Supply a file path."
+    }
+    if ((Test-Path -LiteralPath $Path) -and -not $Overwrite) {
+        throw "Password file '$Path' already exists. No accounts were created. Use OverwritePasswordFile only after confirming that replacement is intended."
+    }
+
+    $directory = [IO.Path]::GetDirectoryName($Path)
+    if ([string]::IsNullOrWhiteSpace($directory)) {
+        throw "PasswordFilePath must include a parent directory."
+    }
+    [void] [IO.Directory]::CreateDirectory($directory)
+
+    $temporaryPath = Join-Path $directory ".$([IO.Path]::GetRandomFileName()).tmp"
+    try {
+        $entries = @(
+            foreach ($upn in ($Passwords.Keys | Sort-Object)) {
+                [ordered]@{
+                    userPrincipalName = $upn
+                    encryptedPassword = ConvertFrom-SecureString $Passwords[$upn]
+                }
+            }
+        )
+        $artifact = [ordered]@{
+            schemaVersion = 1
+            protection = "WindowsUserDpapiSecureString"
+            tenantId = $ArtifactTenantId.Guid
+            createdAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
+            accounts = $entries
+        }
+        [IO.File]::WriteAllText(
+            $temporaryPath,
+            ($artifact | ConvertTo-Json -Depth 4),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Move-Item -LiteralPath $temporaryPath -Destination $Path -Force:$Overwrite
+
+        $persistedArtifact = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        if (
+            $persistedArtifact.schemaVersion -ne 1 -or
+            $persistedArtifact.protection -ne "WindowsUserDpapiSecureString" -or
+            $persistedArtifact.tenantId -ne $ArtifactTenantId.Guid -or
+            @($persistedArtifact.accounts).Count -ne $Passwords.Count
+        ) {
+            throw "Password file '$Path' failed metadata verification. No accounts were created."
+        }
+        foreach ($entry in @($persistedArtifact.accounts)) {
+            if (
+                [string]::IsNullOrWhiteSpace($entry.userPrincipalName) -or
+                -not $Passwords.Contains($entry.userPrincipalName) -or
+                [string]::IsNullOrWhiteSpace($entry.encryptedPassword)
+            ) {
+                throw "Password file '$Path' contains an unexpected or incomplete account entry. No accounts were created."
+            }
+            $recoveredPassword = $null
+            try {
+                $recoveredPassword = ConvertTo-SecureString $entry.encryptedPassword
+                if (
+                    (Get-SecurePasswordFingerprint $recoveredPassword) -ne
+                    $Fingerprints[$entry.userPrincipalName]
+                ) {
+                    throw "Password file '$Path' failed recovery verification for '$($entry.userPrincipalName)'. No accounts were created."
+                }
+            }
+            finally {
+                if ($null -ne $recoveredPassword) {
+                    $recoveredPassword.Dispose()
+                }
+            }
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryPath) {
+            Remove-Item -LiteralPath $temporaryPath -Force
+        }
+    }
 }
 
 Import-Module (Join-Path $PSScriptRoot "SecureM365.Common.psm1") -Force -ErrorAction Stop
@@ -133,61 +327,36 @@ if (-not $PSCmdlet.ShouldProcess($TenantId.Guid, $operation)) {
     return
 }
 
-Write-Warning "Store a different randomly generated password for each account in your approved emergency credential store before entering it. Do not enable HTTP request logging or debugging."
-
 $passwords = @{}
+$passwordFingerprints = @{}
 $createdAccounts = [System.Collections.Generic.List[object]]::new()
 $creationAttempted = $false
 $completed = $false
 
 try {
-    # Validate every password before the first write to avoid a partially configured pair.
+    # Generate and persist every password before the first tenant write.
     foreach ($account in $plannedAccounts) {
         $upn = $account.UserPrincipalName
-        $passwords[$upn] = Read-Host "Enter the stored password for $upn (32-256 characters)" -AsSecureString
-        if ($passwords[$upn].Length -lt 32 -or $passwords[$upn].Length -gt 256) {
-            throw "The password for '$upn' must contain 32-256 characters. No accounts were created."
-        }
-
-        $confirmation = $null
-        $plainPassword = $null
-        $plainConfirmation = $null
-        try {
-            $confirmation = Read-Host "Confirm the password for $upn" -AsSecureString
-            $plainPassword = [System.Net.NetworkCredential]::new("", $passwords[$upn]).Password
-            $plainConfirmation = [System.Net.NetworkCredential]::new("", $confirmation).Password
-
-            if (-not [string]::Equals($plainPassword, $plainConfirmation, [StringComparison]::Ordinal)) {
-                throw "The passwords for '$upn' do not match. No accounts were created."
+        do {
+            if ($passwords.Contains($upn)) {
+                $passwords[$upn].Dispose()
             }
-            $characterCategories = @(
-                @("[a-z]", "[A-Z]", "[0-9]", "[^a-zA-Z0-9]") |
-                    Where-Object { $plainPassword -cmatch $_ }
-            )
-            if ($plainPassword -cmatch '[^\x20-\x7E]' -or $characterCategories.Count -lt 3) {
-                throw "Use printable ASCII and at least three categories (lowercase, uppercase, digits, symbols) for '$upn'. No accounts were created."
-            }
-            foreach ($otherUpn in $passwords.Keys) {
-                if (
-                    $otherUpn -ne $upn -and
-                    [string]::Equals(
-                        $plainPassword,
-                        [System.Net.NetworkCredential]::new("", $passwords[$otherUpn]).Password,
-                        [StringComparison]::Ordinal
-                    )
-                ) {
-                    throw "Emergency access accounts must have different passwords. No accounts were created."
-                }
-            }
-        }
-        finally {
-            $plainPassword = $null
-            $plainConfirmation = $null
-            if ($null -ne $confirmation) {
-                $confirmation.Dispose()
-            }
-        }
+            $passwords[$upn] = New-EmergencyPassword
+            $passwordFingerprints[$upn] = Get-SecurePasswordFingerprint $passwords[$upn]
+        } while (
+            @($passwordFingerprints.GetEnumerator() | Where-Object {
+                $_.Key -ne $upn -and $_.Value -eq $passwordFingerprints[$upn]
+            }).Count -gt 0
+        )
     }
+
+    Save-EmergencyPasswordArtifact `
+        -ArtifactTenantId $TenantId `
+        -Passwords $passwords `
+        -Fingerprints $passwordFingerprints `
+        -Path $PasswordFilePath `
+        -Overwrite:$OverwritePasswordFile
+    Write-Warning "Emergency passwords were saved to '$PasswordFilePath' with Windows user-scoped DPAPI protection. Copy the file to an approved protected backup; only this Windows user on this computer can decrypt it."
 
     foreach ($account in $plannedAccounts) {
         $upn = $account.UserPrincipalName
@@ -268,6 +437,8 @@ finally {
     foreach ($password in $passwords.Values) {
         $password.Dispose()
     }
+    $passwords.Clear()
+    $passwordFingerprints.Clear()
     if ($creationAttempted -and -not $completed) {
         Write-Warning "Provisioning stopped after a write was attempted. No changes were rolled back. Review all requested usernames in tenant '$($TenantId.Guid)' before retrying, including requests whose outcome is unknown."
         foreach ($account in $createdAccounts) {
