@@ -157,3 +157,35 @@ Describe "Script 99 SSPR policy assessment" {
         $source | Should Match "Evidence\s*=\s*\`$assessment\.Evidence"
     }
 }
+
+Describe "Script 99 recommendation inventory" {
+    It "contains ten recommendations without the role-baseline check" {
+        $assignment = @(
+            $ast.FindAll(
+                {
+                    param($node)
+                    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                        $node.Left.Extent.Text -eq '$checks'
+                },
+                $true
+            )
+        )
+        $assignment.Count | Should Be 1
+
+        $checks = & ([scriptblock]::Create(
+            "$($assignment[0].Extent.Text)`n`$checks"
+        ))
+        $checks.Count | Should Be 10
+        $checks[9].Title | Should Be "Ensure 'Self service password reset enabled' is set to 'All'"
+        @(
+            $checks | Where-Object {
+                $_.Title -eq "Use least privileged administrative roles"
+            }
+        ).Count | Should Be 0
+        @(
+            $ast.ParamBlock.Parameters | Where-Object {
+                $_.Name.VariablePath.UserPath -eq "ApprovedBaselinePath"
+            }
+        ).Count | Should Be 0
+    }
+}

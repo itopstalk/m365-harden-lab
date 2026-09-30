@@ -3,7 +3,7 @@
 
 <#
 .SYNOPSIS
-Displays the live status of the 11 Microsoft 365 recommendations in the guide.
+Displays the live status of the 10 Microsoft 365 recommendations in the guide.
 
 .DESCRIPTION
 Run after scripts 00 and 01. Uses read-only Microsoft Graph v1.0 and Teams queries,
@@ -39,12 +39,6 @@ Explicitly approved Conditional Access group exclusions.
 .PARAMETER ApprovedExcludedRoleId
 Explicitly approved Conditional Access exclusions, using role template IDs.
 
-.PARAMETER ApprovedBaselinePath
-Optional reviewed role-assignment CSV with PrincipalId, RoleName, and
-DirectoryScopeId columns, as exported by script 50 and used by script 52.
-Review and approve it first; an unreviewed export is not least-privilege evidence.
-Without a baseline the least-privilege recommendation is UNKNOWN.
-
 .PARAMETER SsprAllScopeConfirmed
 Defaults to true based on the lab operator's confirmation that Entra ID >
 Password reset > Properties is set to All. Microsoft Graph does not expose that
@@ -68,7 +62,7 @@ Thumbprint in Cert:\CurrentUser\My for the Teams application certificate.
 Path to a PFX outside this repository.
 
 .PARAMETER PassThru
-Also return the 11 structured result objects for filtering or export. Each
+Also return the 10 structured result objects for filtering or export. Each
 result includes Evidence; Details contains the same value for compatibility.
 
 .NOTES
@@ -103,7 +97,6 @@ param(
     [guid[]] $ApprovedExcludedUserId = @(),
     [guid[]] $ApprovedExcludedGroupId = @(),
     [guid[]] $ApprovedExcludedRoleId = @(),
-    [string] $ApprovedBaselinePath,
     [switch] $SsprAllScopeConfirmed = $true,
     [Alias("UseDeviceCode")]
     [switch] $UseGraphDeviceCode,
@@ -463,51 +456,6 @@ function Get-TeamsAssessment {
     New-Assessment "IMPLEMENTED" "Global: $Property is '$Expected'."
 }
 
-function Get-RoleBaselineAssessment {
-    $assignments = @(Get-CheckData "RoleAssignments")
-    $roles = @(Get-CheckData "RoleDefinitions")
-    if ($assignments.Count -eq 0) { throw "No active role assignments were returned." }
-    if ([string]::IsNullOrWhiteSpace($ApprovedBaselinePath)) {
-        return New-Assessment "UNKNOWN" "$($assignments.Count) active role assignments found. Supply -ApprovedBaselinePath with a reviewed CSV; software cannot infer each administrator's legitimate tasks."
-    }
-    $baseline = @(Import-Csv -LiteralPath $ApprovedBaselinePath -ErrorAction Stop)
-    if ($baseline.Count -eq 0) { throw "The approved role baseline is empty." }
-    foreach ($row in $baseline) {
-        $principalId = [guid]::Empty
-        if (
-            -not [guid]::TryParse([string] $row.PrincipalId, [ref] $principalId) -or
-            $principalId -eq [guid]::Empty -or
-            [string]::IsNullOrWhiteSpace($row.RoleName) -or
-            $row.DirectoryScopeId -notlike "/*"
-        ) {
-            throw "Every baseline row must contain a valid PrincipalId, RoleName, and DirectoryScopeId."
-        }
-    }
-    $unexpected = @(
-        foreach ($assignment in $assignments) {
-            $role = @($roles | Where-Object { $_.id -eq $assignment.roleDefinitionId })
-            if ($role.Count -ne 1 -or [string]::IsNullOrWhiteSpace($role[0].displayName)) {
-                throw "Cannot resolve role definition '$($assignment.roleDefinitionId)' for an active assignment."
-            }
-            if ([string]::IsNullOrWhiteSpace($assignment.directoryScopeId) -or $assignment.appScopeId) {
-                throw "An active role assignment has an unsupported or missing directory scope; review it manually."
-            }
-            $approved = @(
-                $baseline | Where-Object {
-                    $_.PrincipalId -eq $assignment.principalId -and
-                    $_.RoleName -eq $role[0].displayName -and
-                    $_.DirectoryScopeId -eq $assignment.directoryScopeId
-                }
-            )
-            if ($approved.Count -eq 0) { $assignment }
-        }
-    )
-    if ($unexpected.Count -gt 0) {
-        return New-Assessment "NOT-CONFIGURED" "$($unexpected.Count) active role assignments are outside the approved baseline. Use script 52 for the detailed comparison."
-    }
-    New-Assessment "IMPLEMENTED" "All $($assignments.Count) active role assignments match the reviewed baseline. Eligible PIM assignments and the baseline's business justification still need periodic review."
-}
-
 function Get-SsprAssessment {
     try {
         $coverage = @(Get-RegistrationCoverage)
@@ -661,10 +609,6 @@ $checks = @(
         Evaluate = { Get-TeamsAssessment -Property AllowAnonymousUsersToJoinMeeting -Expected $false }
     }
     @{
-        Title = "Use least privileged administrative roles"
-        Evaluate = { Get-RoleBaselineAssessment }
-    }
-    @{
         Title = "Ensure 'Self service password reset enabled' is set to 'All'"
         Evaluate = { Get-SsprAssessment }
     }
@@ -705,5 +649,5 @@ $results |
 $implemented = @($results | Where-Object Status -eq "IMPLEMENTED").Count
 $notConfigured = @($results | Where-Object Status -eq "NOT-CONFIGURED").Count
 $unknown = @($results | Where-Object Status -eq "UNKNOWN").Count
-Write-Host "`nSummary: $implemented implemented, $notConfigured not configured, $unknown unknown (11 recommendations)."
+Write-Host "`nSummary: $implemented implemented, $notConfigured not configured, $unknown unknown ($($checks.Count) recommendations)."
 if ($PassThru) { $results }
