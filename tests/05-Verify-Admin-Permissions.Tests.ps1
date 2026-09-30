@@ -352,7 +352,7 @@ Describe "05 administrator permission verification (offline)" {
             }
         ) | Sort-Object -Unique
         @($scopeValues | Where-Object { $_ -notin $script:allScopes }).Count | Should Be 0
-        $script:allScopes.Count | Should Be 13
+        $script:allScopes.Count | Should Be 12
     }
 
     It "returns an empty membership collection from the fixture" {
@@ -495,7 +495,7 @@ Describe "05 administrator permission verification (offline)" {
         $result.Ready | Should Be $false
         $result.CanAssignRoles | Should Be $true
         $result.MissingRoles.Count | Should Be 5
-        @($result.GraphPermissions | Where-Object Status -eq "NOT IN TOKEN").Count | Should Be 6
+        @($result.GraphPermissions | Where-Object Status -eq "NOT IN TOKEN").Count | Should Be 5
         $result.AssignmentsCreated.Count | Should Be 0
         $script:fixture.PostCount | Should Be 0
         $script:fixture.Connects.Count | Should Be 1
@@ -517,7 +517,7 @@ Describe "05 administrator permission verification (offline)" {
         $script:fixture.ExistingScopes = @()
         $result = Invoke-Checker -CheckOnly
         $result.MissingRoles.Count | Should Be 0
-        @($result.GraphPermissions | Where-Object Status -eq "NOT IN TOKEN").Count | Should Be 6
+        @($result.GraphPermissions | Where-Object Status -eq "NOT IN TOKEN").Count | Should Be 5
         $result.Ready | Should Be $false
     }
 

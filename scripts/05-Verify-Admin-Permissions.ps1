@@ -153,8 +153,8 @@ $roleTemplates = @{
 }
 $roleRequirements = @(
     @{
-        Capability = "Security defaults and Conditional Access"
-        Scripts = "02-03, 10-20, 99"
+        Capability = "Conditional Access"
+        Scripts = "10-20, 99"
         Role = "Conditional Access Administrator"
         Alternatives = @("Security Administrator")
     }
@@ -212,7 +212,6 @@ $requiredScopes = @(
     "Policy.Read.All"
     "Policy.ReadWrite.Authorization"
     "Policy.ReadWrite.ConditionalAccess"
-    "Policy.ReadWrite.SecurityDefaults"
     "RoleManagement.Read.Directory"
     "RoleManagement.ReadWrite.Directory"
     "SecurityEvents.Read.All"
