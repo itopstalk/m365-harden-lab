@@ -15,6 +15,7 @@ $authenticationFunctions = @(
     "Get-SecureM365OAuthAuthorizationCode"
     "Get-SecureM365ValidatedBrowserToken"
     "Invoke-SecureM365BrowserPkce"
+    "Get-SecureM365GraphScopeSet"
     "Connect-SecureM365Graph"
 )
 foreach ($statement in $moduleAst.EndBlock.Statements) {
@@ -173,6 +174,26 @@ Describe "SecureM365 Graph authentication (offline)" {
         } | Should Throw "cannot be combined"
     }
 
+    It "defines a complete, unique all-scripts consent profile" {
+        $readOnly = @(Get-SecureM365GraphScopeSet -Profile ReadOnly)
+        $allScripts = @(Get-SecureM365GraphScopeSet -Profile AllScripts)
+
+        $readOnly.Count | Should Be 5
+        $allScripts.Count | Should Be 15
+        @($allScripts | Sort-Object -Unique).Count | Should Be $allScripts.Count
+        @($readOnly | Where-Object { $_ -notin $allScripts }).Count | Should Be 0
+        foreach ($scope in @(
+            "Application.ReadWrite.All"
+            "AppRoleAssignment.ReadWrite.All"
+            "Policy.ReadWrite.Authorization"
+            "Policy.ReadWrite.ConditionalAccess"
+            "RoleManagement.ReadWrite.Directory"
+            "User.Create"
+        )) {
+            ($allScripts -contains $scope) | Should Be $true
+        }
+    }
+
     It "reuses a matching delegated context after a Graph user probe" {
         $script:context = [pscustomobject]@{
             TenantId = $script:tenant
@@ -247,6 +268,20 @@ Describe "SecureM365 Graph authentication (offline)" {
 }
 
 Describe "Authentication secret protections" {
+    It "exports the complete-workflow scope helper from the common module" {
+        $module = Import-Module $modulePath -Force -PassThru
+        $module.ExportedFunctions.ContainsKey("Get-SecureM365GraphScopeSet") |
+            Should Be $true
+    }
+
+    It "defaults the connection script to complete-workflow consent" {
+        $source = Get-Content (Join-Path $scriptsRoot "01-Test-TenantConnections.ps1") -Raw
+        $source | Should Match '\[switch\]\s*\$ConsentForAllScripts\s*=\s*\$true'
+        $source | Should Match 'Get-SecureM365GraphScopeSet\s+-Profile\s+AllScripts'
+        $source | Should Match '-AdditionalScopes\s+\$additionalScopes'
+        $source | Should Match '-ConsentForAllScripts:\$false'
+    }
+
     It "contains no password or credential-file input path" {
         $source = Get-Content $modulePath -Raw
         $source | Should Not Match '(?i)\[securestring\]\s*\$password'

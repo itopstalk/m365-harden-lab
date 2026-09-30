@@ -13,6 +13,14 @@ Run with -IncludeTeams before script 99 to detect Teams access failures early.
 Use script 05 before configuration scripts to check all required administrator
 roles and Graph permissions and, with confirmation, assign missing lab roles.
 
+By default, the script requests the full delegated Microsoft Graph scope set
+used by scripts 00-99 in one authorization transaction so subsequent scripts in
+this PowerShell process can reuse the validated token without incremental Graph
+consent prompts. This includes application, policy, role, and user creation
+permissions. It does not grant Entra roles or authorize Teams and Exchange,
+which have separate service connections. Use -ConsentForAllScripts:$false only
+for read-only connection validation.
+
 In the GitHub Copilot App's embedded terminal, use -UseGraphBrowserPkce. It opens
 Microsoft sign-in in the system browser and receives the authorization result on
 a temporary localhost callback. Passwords are never accepted or stored by this
@@ -26,6 +34,14 @@ blank, non-GUID, and all-zero values.
 Use browser authorization-code authentication with PKCE, a random state and
 nonce, and a temporary loopback callback. This is intended for embedded or
 managed terminals where WAM and device-code prompts are not displayed.
+
+.PARAMETER ConsentForAllScripts
+Request every delegated Microsoft Graph scope used by scripts 00-99 in one
+authorization transaction. This defaults to true. Set it explicitly to false
+only for read-only connection validation. Keep subsequent scripts in this
+PowerShell process so the process-scoped token can be reused, and review the
+requested write permissions on Microsoft's consent page. Teams and Exchange
+authentication remain separate.
 
 .PARAMETER IncludeTeams
 Also connect to Microsoft Teams and verify meeting-policy read access. The Teams
@@ -51,6 +67,9 @@ deliberately deployed to this Windows profile or machine.
 .EXAMPLE
 .\01-Test-TenantConnections.ps1 -UseGraphBrowserPkce
 
+.EXAMPLE
+.\01-Test-TenantConnections.ps1 -TenantId $TenantId -UseGraphBrowserPkce -ConsentForAllScripts:$false
+
 .LINK
 https://learn.microsoft.com/microsoftteams/using-admin-roles
 #>
@@ -60,6 +79,8 @@ param(
     [string] $TenantId,
 
     [switch] $IncludeTeams,
+    [Alias("ConsentAll")]
+    [switch] $ConsentForAllScripts = $true,
     [switch] $UseGraphDeviceCode,
     [switch] $UseGraphBrowserPkce,
     [switch] $UseTeamsDeviceAuthentication,
@@ -74,8 +95,17 @@ $commonModule = Join-Path $PSScriptRoot "SecureM365.Common.psm1"
 Import-Module $commonModule -Force -ErrorAction Stop
 $TenantId = Resolve-SecureM365TenantId -TenantId $TenantId -PromptIfMissing
 
+$additionalScopes = if ($ConsentForAllScripts) {
+    Write-Host "Requesting the complete delegated Microsoft Graph scope set for scripts 00-99."
+    @(Get-SecureM365GraphScopeSet -Profile AllScripts)
+}
+else {
+    @()
+}
+
 $graphContext = Connect-SecureM365Graph `
     -TenantId $TenantId `
+    -AdditionalScopes $additionalScopes `
     -UseDeviceCode:$UseGraphDeviceCode `
     -UseBrowserPkce:$UseGraphBrowserPkce
 

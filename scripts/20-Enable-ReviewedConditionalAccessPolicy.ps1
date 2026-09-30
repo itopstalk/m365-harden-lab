@@ -9,7 +9,13 @@ param(
     [Parameter(Mandatory)]
     [guid] $ConditionalAccessPolicyId,
 
-    [switch] $UseDeviceCode
+    [switch] $UseDeviceCode,
+
+    [ValidateRange(1, 12)]
+    [int] $PropagationRetryCount = 6,
+
+    [ValidateRange(0, 60)]
+    [int] $PropagationRetryDelaySeconds = 10
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,9 +27,32 @@ Connect-SecureM365Graph `
     -UseDeviceCode:$UseDeviceCode |
     Out-Null
 
-$policy = Get-MgIdentityConditionalAccessPolicy `
-    -ConditionalAccessPolicyId $ConditionalAccessPolicyId.Guid `
-    -ErrorAction Stop
+function Get-ReviewedConditionalAccessPolicy {
+    param([Parameter(Mandatory)][guid] $PolicyId)
+
+    foreach ($attempt in 1..$PropagationRetryCount) {
+        try {
+            return Get-MgIdentityConditionalAccessPolicy `
+                -ConditionalAccessPolicyId $PolicyId.Guid `
+                -ErrorAction Stop
+        }
+        catch {
+            $notFound =
+                [string] $_.Exception.ResponseStatusCode -eq "NotFound" -or
+                [string] $_.Exception.ResponseStatusCode -eq "404" -or
+                $_.Exception.Message -match '(?i)\b404\b|ResourceNotFound|does not exist in the directory'
+            if (-not $notFound -or $attempt -eq $PropagationRetryCount) {
+                throw
+            }
+            Write-Warning "Conditional Access policy '$($PolicyId.Guid)' is not readable yet; waiting $PropagationRetryDelaySeconds seconds for propagation (attempt $attempt of $PropagationRetryCount)."
+            if ($PropagationRetryDelaySeconds -gt 0) {
+                Start-Sleep -Seconds $PropagationRetryDelaySeconds
+            }
+        }
+    }
+}
+
+$policy = Get-ReviewedConditionalAccessPolicy -PolicyId $ConditionalAccessPolicyId
 
 if ($policy.State -eq "enabled") {
     $policy | Select-Object Id, DisplayName, State
@@ -40,7 +69,5 @@ if ($PSCmdlet.ShouldProcess($policy.DisplayName, "Enable Conditional Access poli
         -ErrorAction Stop
 }
 
-Get-MgIdentityConditionalAccessPolicy `
-    -ConditionalAccessPolicyId $policy.Id `
-    -ErrorAction Stop |
+Get-ReviewedConditionalAccessPolicy -PolicyId ([guid] $policy.Id) |
     Select-Object Id, DisplayName, State

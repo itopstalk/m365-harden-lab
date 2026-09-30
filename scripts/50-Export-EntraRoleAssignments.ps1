@@ -19,27 +19,69 @@ Connect-SecureM365Graph `
     -UseDeviceCode:$UseDeviceCode |
     Out-Null
 
-$roleDefinitions = Get-MgRoleManagementDirectoryRoleDefinition -All -ErrorAction Stop
+$roleDefinitions = @(
+    Get-SecureM365GraphCollection `
+        -Uri 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?$select=id,displayName'
+)
 $roleNameById = @{}
 foreach ($role in $roleDefinitions) {
-    $roleNameById[$role.Id] = $role.DisplayName
+    if (
+        [string]::IsNullOrWhiteSpace([string] $role.id) -or
+        [string]::IsNullOrWhiteSpace([string] $role.displayName) -or
+        $roleNameById.ContainsKey([string] $role.id)
+    ) {
+        throw "Graph returned an incomplete or duplicate role definition."
+    }
+    $roleNameById[[string] $role.id] = [string] $role.displayName
 }
 
-$assignments = Get-MgRoleManagementDirectoryRoleAssignment -All -ErrorAction Stop
+$assignments = @(
+    Get-SecureM365GraphCollection `
+        -Uri 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?$select=id,principalId,roleDefinitionId,directoryScopeId'
+)
 $report = @(
     foreach ($assignment in $assignments) {
-        $scope = if ($assignment.DirectoryScopeId) {
-            $assignment.DirectoryScopeId
+        if (
+            [string]::IsNullOrWhiteSpace([string] $assignment.id) -or
+            [string]::IsNullOrWhiteSpace([string] $assignment.principalId) -or
+            [string]::IsNullOrWhiteSpace([string] $assignment.roleDefinitionId) -or
+            [string]::IsNullOrWhiteSpace([string] $assignment.directoryScopeId)
+        ) {
+            throw "Graph returned an incomplete active role assignment."
         }
-        else {
-            "/"
+        $roleName = $roleNameById[[string] $assignment.roleDefinitionId]
+        if ([string]::IsNullOrWhiteSpace($roleName)) {
+            throw "Role assignment '$($assignment.id)' references unresolved role definition '$($assignment.roleDefinitionId)'."
         }
 
+        $principalId = [uri]::EscapeDataString([string] $assignment.principalId)
+        $principal = Invoke-MgGraphRequest `
+            -Method GET `
+            -Uri "https://graph.microsoft.com/v1.0/directoryObjects/$principalId" `
+            -ErrorAction Stop
+        if (
+            [string] $principal.id -ne [string] $assignment.principalId -or
+            [string]::IsNullOrWhiteSpace([string] $principal.'@odata.type') -or
+            [string]::IsNullOrWhiteSpace([string] $principal.displayName)
+        ) {
+            throw "Role assignment '$($assignment.id)' references an incomplete or unresolved principal."
+        }
+        $principalType = [string] $principal.'@odata.type' -replace '^#microsoft\.graph\.', ''
+        $principalName = @(
+            [string] $principal.userPrincipalName
+            [string] $principal.appId
+            [string] $principal.displayName
+        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            Select-Object -First 1
+
         [pscustomobject]@{
-            AssignmentId    = $assignment.Id
-            PrincipalId     = $assignment.PrincipalId
-            RoleName        = $roleNameById[$assignment.RoleDefinitionId]
-            DirectoryScopeId = $scope
+            AssignmentId       = [string] $assignment.id
+            PrincipalId        = [string] $assignment.principalId
+            PrincipalType      = $principalType
+            PrincipalName      = $principalName
+            RoleDefinitionId   = [string] $assignment.roleDefinitionId
+            RoleName           = $roleName
+            DirectoryScopeId   = [string] $assignment.directoryScopeId
         }
     }
 )

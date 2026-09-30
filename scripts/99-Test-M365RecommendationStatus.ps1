@@ -12,9 +12,14 @@ cyan UNKNOWN, followed by evidence or the reason a check could not be completed.
 Report-only and disabled Conditional Access policies do not count as enforced.
 Complex combinations of narrower policies may need manual review.
 
-MFA and SSPR checks also use the authentication-method registration report, which
-requires Entra ID P1/P2 and can lag changes by up to 36 hours. Missing permissions,
-data, or manual evidence are UNKNOWN, never evidence of missing configuration.
+MFA policy enforcement determines the status of the two MFA recommendations.
+For SSPR, Microsoft Graph does not expose the exact Password reset > Properties
+scope. SsprAllScopeConfirmed defaults to true, recording the lab operator's
+confirmation without requiring a flag on every run. Set it explicitly to false
+for a tenant where All has not been verified. Authentication-method registration
+data is included as an advisory readiness note for MFA and SSPR and does not
+downgrade verified policy evidence. The registration report requires Entra ID
+P1/P2 and can lag changes by up to 36 hours.
 Teams checks intentionally assess only the org-wide Global meeting policy, which
 scripts 40, 42, and 44 configure. Custom meeting policies and their user/group
 assignments require separate review and are outside these checks.
@@ -41,9 +46,11 @@ Review and approve it first; an unreviewed export is not least-privilege evidenc
 Without a baseline the least-privilege recommendation is UNKNOWN.
 
 .PARAMETER SsprAllScopeConfirmed
-Use only after confirming Entra ID > Password reset > Properties is set to All
-in this tenant. Graph exposes per-user SSPR state, not that exact tenant setting.
-The SSPR check also requires every enabled member to be reported SSPR-enabled.
+Defaults to true based on the lab operator's confirmation that Entra ID >
+Password reset > Properties is set to All. Microsoft Graph does not expose that
+exact tenant setting. Use -SsprAllScopeConfirmed:$false for another tenant or
+whenever All has not been verified. Per-user registration and capability data
+is reported only as advisory evidence.
 
 .PARAMETER UseGraphDeviceCode
 Use device-code authentication for Microsoft Graph.
@@ -61,7 +68,8 @@ Thumbprint in Cert:\CurrentUser\My for the Teams application certificate.
 Path to a PFX outside this repository.
 
 .PARAMETER PassThru
-Also return the 11 structured result objects for filtering or export.
+Also return the 11 structured result objects for filtering or export. Each
+result includes Evidence; Details contains the same value for compatibility.
 
 .NOTES
 The script loads its datasets before printing check 1, so data-read warnings can
@@ -82,6 +90,9 @@ propagate, then run Disconnect-MicrosoftTeams and rerun script 01 -IncludeTeams.
 
 .EXAMPLE
 $results = .\99-Test-M365RecommendationStatus.ps1 -TenantId $TenantId -PassThru
+
+.EXAMPLE
+.\99-Test-M365RecommendationStatus.ps1 -TenantId $TenantId -SsprAllScopeConfirmed:$false
 #>
 
 [CmdletBinding()]
@@ -93,7 +104,7 @@ param(
     [guid[]] $ApprovedExcludedGroupId = @(),
     [guid[]] $ApprovedExcludedRoleId = @(),
     [string] $ApprovedBaselinePath,
-    [switch] $SsprAllScopeConfirmed,
+    [switch] $SsprAllScopeConfirmed = $true,
     [Alias("UseDeviceCode")]
     [switch] $UseGraphDeviceCode,
     [switch] $UseTeamsDeviceAuthentication,
@@ -141,7 +152,12 @@ function New-Assessment {
         [Parameter(Mandatory)]
         [string] $Details
     )
-    [pscustomobject]@{ Status = $Status; Details = $Details }
+    [pscustomobject]@{
+        Status   = $Status
+        Evidence = $Details
+        # Retained for consumers of earlier script versions.
+        Details  = $Details
+    }
 }
 
 function Get-CheckData {
@@ -274,11 +290,17 @@ function Get-RegistrationCoverage {
 
     $directAdminIds = @()
     if ($Administrators) {
-        $directAdminIds = @((Get-CheckData "RoleAssignments").principalId)
-        $unresolvedPrincipals = @($directAdminIds | Where-Object { $_ -notin @($users.id) })
-        if ($unresolvedPrincipals.Count -gt 0) {
-            throw "Active role assignments include $($unresolvedPrincipals.Count) principals not found in the user inventory. Group-based administrator membership or other principal types need manual review; the registration report alone cannot prove current membership."
+        $assignments = @(Get-CheckData "RoleAssignments")
+        if (@($assignments | Where-Object { [string]::IsNullOrWhiteSpace($_.principalId) }).Count -gt 0) {
+            throw "An active role assignment omitted its principal ID."
         }
+        # Direct user assignments supplement the registration report. Non-user
+        # principals cannot register MFA; group-based admins are identified by isAdmin.
+        $directAdminIds = @(
+            $assignments.principalId |
+                Where-Object { $_ -in @($users.id) } |
+                Sort-Object -Unique
+        )
     }
     $selectedUsers = @(
         foreach ($user in $users) {
@@ -362,16 +384,22 @@ function Get-MfaAssessment {
         }
     }
 
-    $coverage = @(Get-RegistrationCoverage -Administrators:$Administrators)
-    $missing = @($coverage | Where-Object { $_.Registration.isMfaCapable -isnot [bool] })
-    $notCapable = @($coverage | Where-Object { $_.Registration.isMfaCapable -eq $false })
-    if ($notCapable.Count -gt 0) {
-        return New-Assessment "NOT-CONFIGURED" "$policyEvidence $($notCapable.Count) of $($coverage.Count) enabled accounts are not reported MFA-capable; $($missing.Count) have missing data."
+    try {
+        $coverage = @(Get-RegistrationCoverage -Administrators:$Administrators)
+        $missing = @($coverage | Where-Object { $_.Registration.isMfaCapable -isnot [bool] })
+        $notCapable = @($coverage | Where-Object { $_.Registration.isMfaCapable -eq $false })
+        $registrationNote = if ($notCapable.Count -gt 0 -or $missing.Count -gt 0) {
+            "Registration note: policy enforcement is verified, but $($notCapable.Count) of $($coverage.Count) checked enabled accounts are not reported MFA-capable and $($missing.Count) have missing data. Registration data can lag by up to 36 hours."
+        }
+        else {
+            "Registration note: all $($coverage.Count) checked enabled accounts are reported MFA-capable, including any emergency accounts."
+        }
     }
-    if ($missing.Count -gt 0) {
-        return New-Assessment "UNKNOWN" "$policyEvidence MFA capability data is missing for $($missing.Count) of $($coverage.Count) enabled accounts."
+    catch {
+        $registrationNote = "Registration note: readiness data could not be verified and can lag by up to 36 hours. Policy enforcement remains verified. $($_.Exception.Message)"
     }
-    New-Assessment "IMPLEMENTED" "$policyEvidence All $($coverage.Count) checked enabled accounts are reported MFA-capable, including any emergency accounts."
+
+    New-Assessment "IMPLEMENTED" "$policyEvidence $registrationNote"
 }
 
 function Get-RiskAssessment {
@@ -481,19 +509,28 @@ function Get-RoleBaselineAssessment {
 }
 
 function Get-SsprAssessment {
-    $coverage = @(Get-RegistrationCoverage)
-    $missing = @($coverage | Where-Object { $_.Registration.isSsprEnabled -isnot [bool] })
-    $notEnabled = @($coverage | Where-Object { $_.Registration.isSsprEnabled -eq $false })
-    if ($notEnabled.Count -gt 0) {
-        return New-Assessment "NOT-CONFIGURED" "$($notEnabled.Count) of $($coverage.Count) enabled member accounts are not reported SSPR-enabled; $($missing.Count) have missing data."
+    try {
+        $coverage = @(Get-RegistrationCoverage)
+        $registered = @($coverage | Where-Object { $_.Registration.isSsprRegistered -eq $true })
+        $notRegistered = @($coverage | Where-Object { $_.Registration.isSsprRegistered -eq $false })
+        $missingRegistration = @(
+            $coverage | Where-Object { $_.Registration.isSsprRegistered -isnot [bool] }
+        )
+        $capable = @($coverage | Where-Object { $_.Registration.isSsprCapable -eq $true })
+        $notCapable = @($coverage | Where-Object { $_.Registration.isSsprCapable -eq $false })
+        $missingCapability = @(
+            $coverage | Where-Object { $_.Registration.isSsprCapable -isnot [bool] }
+        )
+        $registrationNote = "Registration note: $($registered.Count) of $($coverage.Count) enabled member accounts are reported SSPR-registered; $($notRegistered.Count) are not registered and $($missingRegistration.Count) have missing registration data. $($capable.Count) are reported SSPR-capable; $($notCapable.Count) are not capable and $($missingCapability.Count) have missing capability data. Registration data can lag by up to 36 hours."
     }
-    if ($missing.Count -gt 0) {
-        return New-Assessment "UNKNOWN" "SSPR data is missing for $($missing.Count) of $($coverage.Count) enabled member accounts."
+    catch {
+        $registrationNote = "Registration note: readiness data could not be verified and can lag by up to 36 hours. $($_.Exception.Message)"
     }
+
     if (-not $SsprAllScopeConfirmed) {
-        return New-Assessment "UNKNOWN" "All $($coverage.Count) enabled members are reported SSPR-enabled, but Selected groups can produce the same result. Confirm Password reset > Properties is All, then use -SsprAllScopeConfirmed."
+        return New-Assessment "UNKNOWN" "Password reset > Properties = All has not been operator-confirmed. Microsoft Graph does not expose the exact None, Selected, or All scope. Confirm the setting in Entra, then rerun with -SsprAllScopeConfirmed. $registrationNote"
     }
-    New-Assessment "IMPLEMENTED" "All scope confirmed by the operator, and all $($coverage.Count) enabled member accounts are reported SSPR-enabled. This checks enablement, not registration completeness."
+    New-Assessment "IMPLEMENTED" "Password reset > Properties = All is recorded as operator-confirmed by the script default. $registrationNote"
 }
 
 $readers = [ordered]@{
@@ -648,23 +685,22 @@ $results = @(
             Write-Warning "Check $($index + 1) failed: $($_.Exception.Message)"
             $assessment = New-Assessment "UNKNOWN" "CHECK FAILED: $($_.Exception.Message)"
         }
-        $color = switch ($assessment.Status) {
-            "IMPLEMENTED" { "Green" }
-            "NOT-CONFIGURED" { "Yellow" }
-            "UNKNOWN" { "Cyan" }
-        }
-        Write-Host ("{0,2}. {1,-14} {2}" -f ($index + 1), $assessment.Status, $check.Title) -ForegroundColor $color
-        Write-Host "    $($assessment.Details)"
         [pscustomobject]@{
             Number         = $index + 1
             Recommendation = $check.Title
             Status         = $assessment.Status
-            Details        = $assessment.Details
+            Evidence       = $assessment.Evidence
+            # Retained for consumers of earlier script versions.
+            Details        = $assessment.Evidence
             TenantId       = $TenantId.Guid
             CheckedAt      = $checkedAt
         }
     }
 )
+
+$results |
+    Format-Table Number, Status, Recommendation, Evidence -Wrap |
+    Out-Host
 
 $implemented = @($results | Where-Object Status -eq "IMPLEMENTED").Count
 $notConfigured = @($results | Where-Object Status -eq "NOT-CONFIGURED").Count

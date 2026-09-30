@@ -205,20 +205,7 @@ $roleRequirements = @(
         Alternatives = @("Authentication Policy Administrator")
     }
 )
-$requiredScopes = @(
-    "AuditLog.Read.All"
-    "Directory.Read.All"
-    "Domain.Read.All"
-    "Policy.Read.All"
-    "Policy.ReadWrite.Authorization"
-    "Policy.ReadWrite.ConditionalAccess"
-    "RoleManagement.Read.Directory"
-    "RoleManagement.ReadWrite.Directory"
-    "SecurityEvents.Read.All"
-    "LicenseAssignment.Read.All"
-    "User.Create"
-    "User.Read.All"
-)
+$requiredScopes = @(Get-SecureM365GraphScopeSet -Profile AllScripts)
 $requiredModules = @(
     "Microsoft.Graph.Authentication"
     "Microsoft.Graph.Identity.SignIns"
