@@ -249,6 +249,39 @@ function Invoke-SecureM365BrowserPkce {
     }
 }
 
+function Get-SecureM365GraphScopeSet {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [ValidateSet("ReadOnly", "AllScripts")]
+        [string] $Profile = "ReadOnly"
+    )
+
+    $scopes = @(
+        "AuditLog.Read.All"
+        "Policy.Read.All"
+        "RoleManagement.Read.Directory"
+        "SecurityEvents.Read.All"
+        "User.Read.All"
+    )
+    if ($Profile -eq "AllScripts") {
+        $scopes += @(
+            "Application.ReadWrite.All"
+            "AppRoleAssignment.ReadWrite.All"
+            "Directory.Read.All"
+            "Domain.Read.All"
+            "LicenseAssignment.Read.All"
+            "Organization.Read.All"
+            "Policy.ReadWrite.Authorization"
+            "Policy.ReadWrite.ConditionalAccess"
+            "RoleManagement.ReadWrite.Directory"
+            "User.Create"
+        )
+    }
+
+    [string[]] @($scopes | Sort-Object -Unique)
+}
+
 function Connect-SecureM365Graph {
     [CmdletBinding()]
     param(
@@ -264,15 +297,8 @@ function Connect-SecureM365Graph {
         throw "UseDeviceCode and UseBrowserPkce cannot be combined."
     }
 
-    $readScopes = @(
-        "AuditLog.Read.All"
-        "Policy.Read.All"
-        "RoleManagement.Read.Directory"
-        "SecurityEvents.Read.All"
-        "User.Read.All"
-    )
     $scopes = @(
-        $readScopes
+        Get-SecureM365GraphScopeSet -Profile ReadOnly
         $AdditionalScopes
     ) | Sort-Object -Unique
 
@@ -1221,6 +1247,7 @@ function New-SecureM365BaselineReport {
 
 Export-ModuleMember -Function @(
     "Resolve-SecureM365TenantId"
+    "Get-SecureM365GraphScopeSet"
     "Connect-SecureM365Graph"
     "Connect-SecureM365Teams"
     "Get-SecureM365TeamsProvisioningStatus"

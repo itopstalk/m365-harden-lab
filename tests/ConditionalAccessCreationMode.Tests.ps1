@@ -126,5 +126,7 @@ Describe "Conditional Access creation mode (offline)" {
         $script20 = Get-Content (Join-Path $scriptsRoot "20-Enable-ReviewedConditionalAccessPolicy.ps1") -Raw
         $script20 | Should Match 'enabledForReportingButNotEnforced'
         $script20 | Should Match 'Update-MgIdentityConditionalAccessPolicy'
+        $script20 | Should Match 'PropagationRetryCount'
+        $script20 | Should Match 'ResourceNotFound'
     }
 }

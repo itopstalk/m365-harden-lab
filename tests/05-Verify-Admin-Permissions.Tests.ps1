@@ -19,8 +19,6 @@ $script:checker = [scriptblock]::Create(
 )
 $templatesStatement = $source.EndBlock.Statements | Where-Object { $_.Left.Extent.Text -eq '$roleTemplates' }
 $script:templates = & ([scriptblock]::Create($templatesStatement.Right.Extent.Text))
-$scopesStatement = $source.EndBlock.Statements | Where-Object { $_.Left.Extent.Text -eq '$requiredScopes' }
-$script:allScopes = @(& ([scriptblock]::Create($scopesStatement.Right.Extent.Text)))
 
 $common = [System.Management.Automation.Language.Parser]::ParseFile(
     (Join-Path $scriptsRoot "SecureM365.Common.psm1"), [ref] $null, [ref] $parseErrors
@@ -29,6 +27,7 @@ foreach ($statement in $common.EndBlock.Statements) {
     if (
         $statement -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
         $statement.Name -in @(
+            "Get-SecureM365GraphScopeSet",
             "Connect-SecureM365Graph", "Connect-SecureM365Teams", "Get-SecureM365GraphCollection",
             "Test-SecureM365TeamsServicePlanName", "Test-SecureM365CoreTeamsServicePlanName",
             "Get-SecureM365TeamsProvisioningStatus"
@@ -37,6 +36,7 @@ foreach ($statement in $common.EndBlock.Statements) {
         . ([scriptblock]::Create($statement.Extent.Text))
     }
 }
+$script:allScopes = @(Get-SecureM365GraphScopeSet -Profile AllScripts)
 
 function Connect-MgGraph {
     [CmdletBinding()]
@@ -347,12 +347,12 @@ Describe "05 administrator permission verification (offline)" {
                 $ast.FindAll({
                     param($node)
                     $node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
-                    $node.Value -match '^(AuditLog|Directory|Domain|Policy|RoleManagement|SecurityEvents|User)\.[A-Za-z.]+$'
+                    $node.Value -match '^(Application|AppRoleAssignment|AuditLog|Directory|Domain|LicenseAssignment|Organization|Policy|RoleManagement|SecurityEvents|User)\.[A-Za-z.]+$'
                 }, $true) | ForEach-Object Value
             }
         ) | Sort-Object -Unique
         @($scopeValues | Where-Object { $_ -notin $script:allScopes }).Count | Should Be 0
-        $script:allScopes.Count | Should Be 12
+        $script:allScopes.Count | Should Be 15
     }
 
     It "returns an empty membership collection from the fixture" {
@@ -385,6 +385,13 @@ Describe "05 administrator permission verification (offline)" {
         $assignments[1].directoryScopeId | Should Be "/administrativeUnits/test"
         $assignments[0].ContainsKey("appScopeId") | Should Be $false
         $script:fixture.RoleReads | Should Be 2
+    }
+
+    It "does not require non-user role principals to register MFA in script 99" {
+        $report = Get-Content (Join-Path $scriptsRoot "99-Test-M365RecommendationStatus.ps1") -Raw
+        $report | Should Not Match 'Active role assignments include .* principals not found in the user inventory'
+        $report | Should Match 'Non-user[\s#]+principals cannot register MFA'
+        $report | Should Match 'Where-Object \{ \$_ -in @\(\$users\.id\) \}'
     }
 
     It "recognizes Global Administrator without adding other roles" {
@@ -495,7 +502,7 @@ Describe "05 administrator permission verification (offline)" {
         $result.Ready | Should Be $false
         $result.CanAssignRoles | Should Be $true
         $result.MissingRoles.Count | Should Be 5
-        @($result.GraphPermissions | Where-Object Status -eq "NOT IN TOKEN").Count | Should Be 5
+        @($result.GraphPermissions | Where-Object Status -eq "NOT IN TOKEN").Count | Should Be 8
         $result.AssignmentsCreated.Count | Should Be 0
         $script:fixture.PostCount | Should Be 0
         $script:fixture.Connects.Count | Should Be 1
@@ -517,7 +524,7 @@ Describe "05 administrator permission verification (offline)" {
         $script:fixture.ExistingScopes = @()
         $result = Invoke-Checker -CheckOnly
         $result.MissingRoles.Count | Should Be 0
-        @($result.GraphPermissions | Where-Object Status -eq "NOT IN TOKEN").Count | Should Be 5
+        @($result.GraphPermissions | Where-Object Status -eq "NOT IN TOKEN").Count | Should Be 8
         $result.Ready | Should Be $false
     }
 

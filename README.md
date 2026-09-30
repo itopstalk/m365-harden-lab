@@ -17,18 +17,33 @@ a random state and nonce, and a short-lived localhost callback. Enter credential
 only on Microsoft's page. The scripts never accept a password parameter, read a
 password from `credentials.txt`, or persist access/refresh tokens.
 
+Script 01 requests the complete delegated Microsoft Graph scope set used by
+scripts 00-99 in one authorization transaction by default. This avoids
+incremental Graph consent dialogs as later scripts add user, policy, role,
+application, and authorization-policy write operations. The full set includes
+high-privilege write scopes. Run subsequent scripts in the same PowerShell
+process so they can reuse the validated process-scoped token. For read-only
+connection validation, explicitly opt out with `-ConsentForAllScripts:$false`.
+
 The Microsoft Graph Command Line Tools public client may show a first-run
 delegated-consent page. Review the requested scopes and consent with the intended
 lab account. Admin-restricted scopes can require administrator consent. On
 success, script 01 verifies the tenant, delegated user, and granted scopes. A
 matching process-scoped Graph context is reused; a wrong-tenant or
-insufficient-scope context is never accepted. Subsequent scripts automatically
-return to browser PKCE when that context needs additional scopes. To force the
-same flow in the administrator checker, use:
+insufficient-scope context is never accepted. When full-workflow consent is
+explicitly disabled, subsequent scripts automatically return to browser PKCE
+when a context needs additional scopes. To force the same flow in the
+administrator checker, use:
 
 ```powershell
 .\05-Verify-Admin-Permissions.ps1 -TenantId $TenantId -UseGraphBrowserPkce -CheckOnly
 ```
+
+Microsoft Graph consent cannot authorize other service endpoints. Delegated
+Teams validation can still require a Teams sign-in; script 06 can replace later
+Teams prompts with its dedicated certificate application. Exchange Online uses
+its own modern-authentication connection. Neither boundary can be folded into a
+Microsoft Graph consent dialog.
 
 In Copilot mode, script 05 uses Graph to verify that the tenant has provisioned
 Teams service plans and that the signed-in administrator has a provisioned,
@@ -164,10 +179,12 @@ proof that a Baseline Security Mode setting is enabled.
 Conditional Access, role, consent, Exchange, and Baseline Security Mode changes
 can require propagation and fresh service tokens. Microsoft documents up to
 24 hours for relevant SharePoint legacy-auth changes. The authentication-method
-registration report's existing 36-hour lag does not affect scripts 62-69 because
-they do not use it. Run Microsoft's impact report before enabling a setting;
-Microsoft recommends enabling only after dependencies are remediated and the
-report shows zero impact.
+registration report can lag by up to 36 hours. In script 99, verified policy
+enforcement determines the two MFA recommendation statuses; registration
+coverage is reported separately as an advisory readiness note. The lag does not
+affect scripts 62-69 because they do not use registration data. Run Microsoft's
+impact report before enabling a setting; Microsoft recommends enabling only
+after dependencies are remediated and the report shows zero impact.
 
 Authoritative Microsoft sources are linked in each result and in comment-based
 help. Key API references:
@@ -244,6 +261,23 @@ the same values to `Connect-SecureM365Teams`:
     -TeamsApplicationId $TeamsApplicationId `
     -TeamsCertificateThumbprint $TeamsCertificateThumbprint
 ```
+
+Microsoft Graph does not expose the exact **None**, **Selected**, or **All**
+setting shown under Entra ID > Password reset > Properties. Script 99 defaults
+`SsprAllScopeConfirmed` to true based on the lab operator's confirmation, so the
+normal command requires no SSPR flag. Per-user SSPR registration and capability
+values are shown as advisory evidence and can lag by up to 36 hours.
+
+For another tenant, or whenever **All** has not been verified, fail closed:
+
+```powershell
+.\99-Test-M365RecommendationStatus.ps1 -TenantId $TenantId `
+    -SsprAllScopeConfirmed:$false
+```
+
+Script 99 displays `Number`, `Status`, `Recommendation`, and `Evidence` columns.
+With `-PassThru`, each structured result includes the same `Evidence` value;
+`Details` remains as a compatibility alias for existing consumers.
 
 Certificate authentication removes the Teams sign-in prompt across processes,
 but it does **not** make the private key portable. The default non-exportable key
