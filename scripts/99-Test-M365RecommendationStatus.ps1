@@ -11,6 +11,8 @@ not Secure Score snapshots. Prints green IMPLEMENTED, yellow NOT-CONFIGURED, or
 cyan UNKNOWN, followed by evidence or the reason a check could not be completed.
 Report-only and disabled Conditional Access policies do not count as enforced.
 Complex combinations of narrower policies may need manual review.
+Every run also writes the structured results to a timestamped JSON file under
+C:\SecureM365Snapshots by default, creating that directory when necessary.
 
 MFA policy enforcement determines the status of the two MFA recommendations.
 For SSPR, Microsoft Graph does not expose the exact Password reset > Properties
@@ -38,6 +40,10 @@ Explicitly approved Conditional Access group exclusions.
 
 .PARAMETER ApprovedExcludedRoleId
 Explicitly approved Conditional Access exclusions, using role template IDs.
+
+.PARAMETER SnapshotDirectory
+Directory for the timestamped JSON snapshot. Defaults to
+C:\SecureM365Snapshots and is created when it does not exist.
 
 .PARAMETER SsprAllScopeConfirmed
 Defaults to true based on the lab operator's confirmation that Entra ID >
@@ -97,6 +103,7 @@ param(
     [guid[]] $ApprovedExcludedUserId = @(),
     [guid[]] $ApprovedExcludedGroupId = @(),
     [guid[]] $ApprovedExcludedRoleId = @(),
+    [string] $SnapshotDirectory = "C:\SecureM365Snapshots",
     [switch] $SsprAllScopeConfirmed = $true,
     [Alias("UseDeviceCode")]
     [switch] $UseGraphDeviceCode,
@@ -151,6 +158,49 @@ function New-Assessment {
         # Retained for consumers of earlier script versions.
         Details  = $Details
     }
+}
+
+function Save-RecommendationSnapshot {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [object[]] $Results,
+
+        [Parameter(Mandatory)]
+        [guid] $TenantId,
+
+        [Parameter(Mandatory)]
+        [datetimeoffset] $CheckedAt,
+
+        [Parameter(Mandatory)]
+        [string] $Directory
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Directory)) {
+        throw "SnapshotDirectory cannot be empty."
+    }
+    if (Test-Path -LiteralPath $Directory) {
+        if (-not (Test-Path -LiteralPath $Directory -PathType Container)) {
+            throw "SnapshotDirectory '$Directory' exists but is not a directory."
+        }
+    }
+    else {
+        $null = New-Item -ItemType Directory -Path $Directory -Force -ErrorAction Stop
+    }
+
+    $resolvedDirectory = (Resolve-Path -LiteralPath $Directory -ErrorAction Stop).Path
+    $timestamp = $CheckedAt.UtcDateTime.ToString("yyyyMMdd-HHmmssfff'Z'")
+    $snapshotPath = Join-Path `
+        $resolvedDirectory `
+        "$($TenantId.Guid)-m365-recommendation-status-$timestamp.json"
+    if (Test-Path -LiteralPath $snapshotPath) {
+        throw "Snapshot '$snapshotPath' already exists and will not be overwritten."
+    }
+
+    ConvertTo-Json -InputObject @($Results) -Depth 8 |
+        Set-Content -LiteralPath $snapshotPath -Encoding utf8 -ErrorAction Stop
+    (Resolve-Path -LiteralPath $snapshotPath -ErrorAction Stop).Path
 }
 
 function Get-CheckData {
@@ -642,6 +692,12 @@ $results = @(
     }
 )
 
+$snapshotPath = Save-RecommendationSnapshot `
+    -Results $results `
+    -TenantId $TenantId `
+    -CheckedAt $checkedAt `
+    -Directory $SnapshotDirectory
+
 $results |
     Format-Table Number, Status, Recommendation, Evidence -Wrap |
     Out-Host
@@ -650,4 +706,5 @@ $implemented = @($results | Where-Object Status -eq "IMPLEMENTED").Count
 $notConfigured = @($results | Where-Object Status -eq "NOT-CONFIGURED").Count
 $unknown = @($results | Where-Object Status -eq "UNKNOWN").Count
 Write-Host "`nSummary: $implemented implemented, $notConfigured not configured, $unknown unknown ($($checks.Count) recommendations)."
+Write-Host "Snapshot: $snapshotPath"
 if ($PassThru) { $results }

@@ -278,6 +278,10 @@ For another tenant, or whenever **All** has not been verified, fail closed:
 Script 99 displays `Number`, `Status`, `Recommendation`, and `Evidence` columns.
 With `-PassThru`, each structured result includes the same `Evidence` value;
 `Details` remains as a compatibility alias for existing consumers.
+Every run also creates `C:\SecureM365Snapshots` when necessary and writes a
+timestamped JSON file named
+`<tenant>-m365-recommendation-status-<UTC timestamp>.json`. Use
+`-SnapshotDirectory` to select another directory outside the repository.
 
 Certificate authentication removes the Teams sign-in prompt across processes,
 but it does **not** make the private key portable. The default non-exportable key

@@ -18,6 +18,7 @@ foreach ($statement in $ast.EndBlock.Statements) {
             "Get-RegistrationCoverage"
             "Get-MfaAssessment"
             "Get-SsprAssessment"
+            "Save-RecommendationSnapshot"
         )
     ) {
         . ([scriptblock]::Create($statement.Extent.Text))
@@ -187,5 +188,81 @@ Describe "Script 99 recommendation inventory" {
                 $_.Name.VariablePath.UserPath -eq "ApprovedBaselinePath"
             }
         ).Count | Should Be 0
+    }
+}
+
+Describe "Script 99 snapshot persistence" {
+    BeforeEach {
+        $script:tenantId = [guid] "11111111-1111-4111-8111-111111111111"
+        $script:checkedAt = [datetimeoffset] "2026-09-29T21:24:25-07:00"
+        $script:results = @(
+            [pscustomobject]@{
+                Number = 1
+                Recommendation = "Fixture recommendation"
+                Status = "IMPLEMENTED"
+                Evidence = "Fixture evidence"
+                Details = "Fixture evidence"
+                TenantId = $script:tenantId.Guid
+                CheckedAt = $script:checkedAt
+            }
+        )
+    }
+
+    It "creates a missing directory and writes a timestamped tenant snapshot" {
+        $directory = Join-Path $TestDrive "snapshots"
+        $snapshotPath = Save-RecommendationSnapshot `
+            -Results $script:results `
+            -TenantId $script:tenantId `
+            -CheckedAt $script:checkedAt `
+            -Directory $directory
+
+        Test-Path -LiteralPath $directory -PathType Container | Should Be $true
+        Split-Path -Leaf $snapshotPath |
+            Should Be "11111111-1111-4111-8111-111111111111-m365-recommendation-status-20260930-042425000Z.json"
+        $saved = @(Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json)
+        $saved.Count | Should Be 1
+        $saved[0].Status | Should Be "IMPLEMENTED"
+        $saved[0].Evidence | Should Be "Fixture evidence"
+    }
+
+    It "rejects a snapshot directory path that is an existing file" {
+        $path = Join-Path $TestDrive "snapshot-file-path"
+        [IO.File]::WriteAllText($path, "fixture")
+        Test-Path -LiteralPath $path -PathType Leaf | Should Be $true
+
+        $errorMessage = try {
+            Save-RecommendationSnapshot `
+                -Results $script:results `
+                -TenantId $script:tenantId `
+                -CheckedAt $script:checkedAt `
+                -Directory $path
+            $null
+        }
+        catch {
+            $_.Exception.Message
+        }
+        $errorMessage | Should Match "exists but is not a directory"
+    }
+
+    It "does not overwrite an existing snapshot" {
+        $directory = Join-Path $TestDrive "no-overwrite"
+        $null = Save-RecommendationSnapshot `
+            -Results $script:results `
+            -TenantId $script:tenantId `
+            -CheckedAt $script:checkedAt `
+            -Directory $directory
+
+        $errorMessage = try {
+            Save-RecommendationSnapshot `
+                -Results $script:results `
+                -TenantId $script:tenantId `
+                -CheckedAt $script:checkedAt `
+                -Directory $directory
+            $null
+        }
+        catch {
+            $_.Exception.Message
+        }
+        $errorMessage | Should Match "already exists and will not be overwritten"
     }
 }
