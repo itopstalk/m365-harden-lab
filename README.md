@@ -1,5 +1,13 @@
 git clone https://github.com/itopstalk/m365-harden-lab.git
 
+## Configure the lab using admin centers
+
+The [browser procedure series](videos/README.md) provides a separate recording
+guide for each configuration task, with admin-center navigation, exact lab
+settings, execution order, and the handoff to script 99. It also documents
+browser-only limitations and separates optional automation setup and cleanup
+from the main hardening sequence.
+
 ## Connect from the GitHub Copilot App
 
 Run these commands from the `scripts` directory. If `-TenantId` is omitted,
