@@ -539,8 +539,8 @@ same object IDs used with scripts 10 and 12:
 
 Script 11's coverage advisory uses script 10's 16-role baseline. Script 99's
 administrator coverage advisory checks currently assigned role templates, which
-can include additional roles. The other Conditional Access recommendations in
-script 99 still require verified scopes and approved exclusions.
+can include additional roles. The legacy-authentication and user-risk
+recommendations in script 99 still require verified scopes and approved exclusions.
 
 Registration counts, including emergency accounts, are advisory and can lag by
 up to 36 hours. Missing registration or an unavailable registration report does
@@ -554,6 +554,52 @@ Secure Score. Its MFA `PolicyConfiguration` details are included in both
 
 Copy the updated `SecureM365.Common.psm1` together with scripts 11, 13, and 99 when
 running these checks on another system.
+
+## Sign-in risk policy configuration checks
+
+[Script 16](scripts/16-New-SignInRiskPolicy.ps1) creates CA004 enabled by default,
+targeting All users except the supplied emergency accounts, all resources and
+clients, and both medium and high **sign-in risk**. It requires MFA authentication
+strength and every-time primary-and-secondary reauthentication. Use `-ReportOnly`
+for staging. Risk-based Conditional Access requires Microsoft Entra ID P2.
+
+[Script 17](scripts/17-Test-SignInRiskPolicy.ps1) and the sign-in risk recommendation
+in script 99 share the same enabled-policy assessment. A matching policy must
+target All users, cover **both medium and high sign-in risk**, require MFA, and
+enable **every-time primary-and-secondary reauthentication**. Matching uses the
+actual settings, not the policy name. Disabled and report-only matches have
+`PolicyFound = True` but do not pass. Security Defaults alone is not a sign-in risk policy.
+
+`Resolved = True` / `IMPLEMENTED` means an enabled matching policy was found.
+Emergency-account exclusions do not prevent that result. `CoverageVerified` is a
+separate advisory about all-resource/all-client coverage, additional conditions,
+and approved exclusions. A presence result does not prove every account or
+sign-in is protected. Policy IDs, names, states, risk levels, reauthentication
+settings, and exclusions remain available for review.
+
+```powershell
+$risk = .\17-Test-SignInRiskPolicy.ps1 -TenantId $TenantId
+$risk.Policies | Format-List
+
+# Optional: approve reviewed exclusions for the coverage advisory.
+.\17-Test-SignInRiskPolicy.ps1 -TenantId $TenantId -ApprovedExcludedUserId $EmergencyAccountIds
+
+$results = .\99-Test-M365RecommendationStatus.ps1 -TenantId $TenantId -PassThru
+$results[3].PolicyConfiguration
+```
+
+Neither check needs a risky sign-in event or completed registration reporting.
+Script 17 now returns one policy-assessment object, without the separate Secure
+Score result. Script 99 includes `PolicyConfiguration` in its pass-through
+results and JSON snapshots. Read failures do not become successful assessments.
+
+Users must still enroll usable MFA methods **before** a risky sign-in:
+[Microsoft documents](https://learn.microsoft.com/entra/identity/conditional-access/policy-risk-based-sign-in)
+that risk-based policies block initial MFA registration during risky sessions.
+This runtime requirement is different from detecting the configured policy.
+
+Copy scripts 17 and 99 together with the current `SecureM365.Common.psm1` to the
+separate system. An existing CA004 policy does not need to be recreated.
 
 ## Teams meeting policy scope
 

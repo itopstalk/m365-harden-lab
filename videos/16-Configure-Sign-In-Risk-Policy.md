@@ -77,11 +77,31 @@ For staging, use **Report-only** at step 33 and later complete [procedure 20](20
 | Authentication strength | Multifactor authentication, ID `00000000-0000-0000-0000-000000000002` |
 | Grant operator | `OR`, with only the strength selected |
 | Sign-in frequency | Enabled; `frequencyInterval = everyTime` |
-| Reauthentication scope expected by script 99 | `authenticationType = primaryAndSecondaryAuthentication` |
+| Reauthentication scope required by scripts 17 and 99 | `authenticationType = primaryAndSecondaryAuthentication` |
 
 The intended session control requires fresh primary and secondary authentication, not merely a periodic refresh or an MFA-only session control. The documented portal workflow is **Sign-in frequency > Every time**. If the portal cannot save that configuration, stop for feature/licensing review rather than omitting it.
 
-Users do not need to generate a risky sign-in for script 99 to recognize the enforced policy. Do not simulate attacks or risky activity as part of this configuration recording.
+## Check the policy
+
+Scripts 17 and 99 check for a matching **enabled** policy: All users, medium and
+high sign-in risk, mandatory MFA, and every-time primary-and-secondary
+reauthentication. They report the policy ID, name, state, risk levels, session
+settings, and exclusions. Disabled and report-only policies do not pass, and
+Security Defaults is not a substitute for a risk-based policy.
+
+Exclusions and complete coverage are separate advisories, not reasons to reject
+policy presence. Supplying the emergency IDs through `-ApprovedExcludedUserId`
+lets the coverage advisory recognize those reviewed exclusions. Other conditions
+and resource/client restrictions can still leave `CoverageVerified` false.
+`Resolved = True` / `IMPLEMENTED` confirms configuration, not every sign-in's protection.
+
+Script 17 returns one assessment without a Secure Score result. Script 99 includes
+the same policy evidence in its `PolicyConfiguration` output and JSON snapshots.
+Users do not need to generate a risky sign-in for either check to recognize the
+enabled policy. Do not simulate attacks or risky activity as part of this recording.
+
+Enrollment is still required before an actual risky sign-in: risk-based policies
+block initial MFA registration during risky sessions.
 
 ## Related content
 

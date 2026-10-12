@@ -991,23 +991,42 @@ function Test-SecureM365CaPolicyScope {
 }
 
 function Get-SecureM365MfaPolicyAssessment {
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName = "Mfa")]
     param(
         [AllowEmptyCollection()]
         [object[]] $Policies = @(),
+        [Parameter(ParameterSetName = "Mfa")]
         [bool] $SecurityDefaultsEnabled,
+        [Parameter(ParameterSetName = "Mfa")]
         [switch] $Administrators,
+        [Parameter(ParameterSetName = "Mfa")]
         [string[]] $RequiredRoleIds = @(),
         [hashtable] $ApprovedExclusions = @{},
-        [string] $CoverageReadError
+        [Parameter(ParameterSetName = "Mfa")]
+        [string] $CoverageReadError,
+        [Parameter(Mandatory, ParameterSetName = "SignInRisk")]
+        [switch] $SignInRisk
     )
 
+    $policyKind = if ($SignInRisk) { "sign-in risk MFA" } else { "MFA" }
+    $scopeRisk = if ($SignInRisk) { "SignIn" } else { "None" }
+    $securityDefaultsAccepted = -not $SignInRisk -and $SecurityDefaultsEnabled
     $matching = @(
         $Policies | Where-Object {
             (Test-SecureM365CaRequiresMfa $_) -and
             (
                 (Test-SecureM365CaTargetsAllUsers $_) -or
                 ($Administrators -and @($_.conditions.users.includeRoles | Where-Object { $_ }).Count -gt 0)
+            ) -and
+            (
+                -not $SignInRisk -or
+                (
+                    @($_.conditions.signInRiskLevels) -contains "medium" -and
+                    @($_.conditions.signInRiskLevels) -contains "high" -and
+                    $_.sessionControls.signInFrequency.isEnabled -is [bool] -and
+                    (Test-SecureM365CaUsesEveryTimeSignInFrequency $_) -and
+                    $_.sessionControls.signInFrequency.authenticationType -eq "primaryAndSecondaryAuthentication"
+                )
             )
         }
     )
@@ -1017,31 +1036,37 @@ function Get-SecureM365MfaPolicyAssessment {
             [string]::IsNullOrWhiteSpace([string] $policy.displayName) -or
             $policy.state -notin @("enabled", "disabled", "enabledForReportingButNotEnforced")
         ) {
-            throw "A matching MFA policy has missing identity data or an unrecognized state. Its configuration cannot be verified."
+            throw "A matching $policyKind policy has missing identity data or an unrecognized state. Its configuration cannot be verified."
         }
     }
     $enabled = @($matching | Where-Object state -eq "enabled")
-    $configured = $SecurityDefaultsEnabled -or $enabled.Count -gt 0
+    $configured = $securityDefaultsAccepted -or $enabled.Count -gt 0
     $audience = if ($Administrators) { "all users or directory roles" } else { "all users" }
-    $policyEvidence = if ($SecurityDefaultsEnabled) {
+    $policyEvidence = if ($securityDefaultsAccepted) {
         "Security defaults is enabled."
     }
     elseif ($enabled.Count -gt 0) {
-        "Enabled MFA policy found: " + (($enabled | ForEach-Object {
+        "Enabled $policyKind policy found: " + (($enabled | ForEach-Object {
             "'$($_.displayName)' (ID: $($_.id), state: $($_.state))"
         }) -join "; ") + "."
     }
     elseif ($matching.Count -gt 0) {
-        "MFA policy found, but not enabled: " + (($matching | ForEach-Object {
+        "$policyKind policy found, but not enabled: " + (($matching | ForEach-Object {
             "'$($_.displayName)' (ID: $($_.id), state: $($_.state))"
         }) -join "; ") + ". Disabled and report-only policies do not enforce MFA."
+    }
+    elseif ($SignInRisk) {
+        "No matching sign-in risk MFA policy directly targets all users. A policy name or MFA OR a non-MFA grant is not sufficient."
     }
     else {
         "No matching MFA policy directly targets $audience, and security defaults is disabled. A policy name or MFA OR a non-MFA grant is not sufficient."
     }
+    if ($SignInRisk) {
+        $policyEvidence += " Matching requires All users, medium and high sign-in risk, MFA, and every-time primary-and-secondary reauthentication. Security Defaults alone does not satisfy this check."
+    }
 
     $broadPolicies = @($enabled | Where-Object {
-        Test-SecureM365CaPolicyScope -Policy $_ -ApprovedExclusions $ApprovedExclusions
+        Test-SecureM365CaPolicyScope -Policy $_ -ApprovedExclusions $ApprovedExclusions -Risk $scopeRisk
     })
     $allUsersCovered = @($broadPolicies | Where-Object {
         Test-SecureM365CaTargetsAllUsers $_
@@ -1053,7 +1078,7 @@ function Get-SecureM365MfaPolicyAssessment {
         }
     )
     $missingRoles = @($RequiredRoleIds | Where-Object { $_ -notin $coveredRoles })
-    $coverageVerified = if ($SecurityDefaultsEnabled -or $allUsersCovered) {
+    $coverageVerified = if ($securityDefaultsAccepted -or $allUsersCovered) {
         $missingRoles = @()
         $true
     }
@@ -1064,7 +1089,7 @@ function Get-SecureM365MfaPolicyAssessment {
         $Administrators -and $missingRoles.Count -eq 0
     }
     $coverageEvidence = if ($coverageVerified -eq $true) {
-        "Coverage advisory: broad MFA protection with only approved exclusions was verified."
+        "Coverage advisory: broad $policyKind protection with only approved exclusions was verified."
     }
     elseif ($null -eq $coverageVerified) {
         "Coverage advisory: administrator role coverage could not be evaluated. $CoverageReadError".Trim()
@@ -1075,7 +1100,7 @@ function Get-SecureM365MfaPolicyAssessment {
 
     $policySummaries = @(
         foreach ($policy in $matching) {
-            [pscustomobject]@{
+            $summary = [ordered]@{
                 Id = [string] $policy.id
                 DisplayName = [string] $policy.displayName
                 State = [string] $policy.state
@@ -1087,6 +1112,15 @@ function Get-SecureM365MfaPolicyAssessment {
                 ExcludesGuestsOrExternalUsers = $null -ne $policy.conditions.users.excludeGuestsOrExternalUsers
                 ExclusionsApproved = Test-SecureM365CaHasOnlyApprovedExclusions -Policy $policy @ApprovedExclusions
             }
+            if ($SignInRisk) {
+                $summary.SignInRiskLevels = @($policy.conditions.signInRiskLevels)
+                $summary.SignInFrequency = [pscustomobject]@{
+                    IsEnabled = $policy.sessionControls.signInFrequency.isEnabled
+                    FrequencyInterval = $policy.sessionControls.signInFrequency.frequencyInterval
+                    AuthenticationType = $policy.sessionControls.signInFrequency.authenticationType
+                }
+            }
+            [pscustomobject] $summary
         }
     )
     $exclusions = @(
@@ -1112,10 +1146,10 @@ function Get-SecureM365MfaPolicyAssessment {
 
     [pscustomobject]@{
         Status = if ($configured) { "IMPLEMENTED" } else { "NOT-CONFIGURED" }
-        AssessmentBasis = "Enabled MFA configuration, not complete sign-in coverage"
+        AssessmentBasis = "Enabled $policyKind configuration, not complete sign-in coverage"
         PolicyFound = $matching.Count -gt 0
         EnabledPolicyFound = $enabled.Count -gt 0
-        SecurityDefaultsEnabled = $SecurityDefaultsEnabled
+        SecurityDefaultsEnabled = if ($SignInRisk) { $null } else { $SecurityDefaultsEnabled }
         ProtectionConfigured = $configured
         Resolved = $configured
         CoverageVerified = $coverageVerified
