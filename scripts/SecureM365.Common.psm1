@@ -888,18 +888,243 @@ function Test-SecureM365CaTargetsAllResources {
     param([Parameter(Mandatory)] $Policy)
 
     (@($Policy.conditions.applications.includeApplications) -contains "All") -and
-    (@($Policy.conditions.applications.excludeApplications).Count -eq 0)
+    (@($Policy.conditions.applications.excludeApplications | Where-Object { $_ }).Count -eq 0)
 }
 
 function Test-SecureM365CaRequiresMfa {
     param([Parameter(Mandatory)] $Policy)
 
-    $builtInControls = @($Policy.grantControls.builtInControls)
-    $strength = $Policy.grantControls.authenticationStrength
+    $grant = $Policy.grantControls
+    $controls = @($grant.builtInControls | Where-Object { $_ })
+    $strength = $grant.authenticationStrength
+    $hasMfaStrength =
+        $strength.requirementsSatisfied -eq "mfa" -or
+        $strength.id -in @(
+            "00000000-0000-0000-0000-000000000002"
+            "00000000-0000-0000-0000-000000000003"
+            "00000000-0000-0000-0000-000000000004"
+        )
+    if (
+        $controls -contains "block" -or
+        (-not $hasMfaStrength -and $controls -notcontains "mfa")
+    ) {
+        return $false
+    }
+    if ($grant.operator -eq "AND") {
+        return $true
+    }
+    if ($grant.operator -ne "OR") {
+        return $false
+    }
 
-    ($builtInControls -contains "mfa") -or
-    ($strength.id -eq "00000000-0000-0000-0000-000000000002") -or
-    ($strength.requirementsSatisfied -eq "mfa")
+    # An OR alternative such as a compliant device lets the user bypass MFA.
+    $alternatives = @($controls | Where-Object { $_ -ne "mfa" })
+    $alternatives.Count -eq 0 -and
+        @($grant.termsOfUse | Where-Object { $_ }).Count -eq 0 -and
+        @($grant.customAuthenticationFactors | Where-Object { $_ }).Count -eq 0 -and
+        ($null -eq $strength -or $hasMfaStrength)
+}
+
+function Test-SecureM365CaPolicyScope {
+    param(
+        [Parameter(Mandatory)] $Policy,
+        [hashtable] $ApprovedExclusions = @{},
+        [ValidateSet("None", "SignIn", "User")] [string] $Risk = "None",
+        [switch] $Legacy
+    )
+
+    if (
+        $Policy.state -ne "enabled" -or
+        -not (Test-SecureM365CaHasOnlyApprovedExclusions -Policy $Policy @ApprovedExclusions) -or
+        -not (Test-SecureM365CaTargetsAllResources $Policy)
+    ) {
+        return $false
+    }
+
+    $conditions = $Policy.conditions
+    $apps = $conditions.applications
+    if (
+        $null -ne $apps.applicationFilter -or
+        @($apps.includeUserActions | Where-Object { $_ }).Count -gt 0 -or
+        @($apps.includeAuthenticationContextClassReferences | Where-Object { $_ }).Count -gt 0
+    ) {
+        return $false
+    }
+
+    $clients = @($conditions.clientAppTypes)
+    if ($clients -notcontains "all") {
+        if (
+            -not $Legacy -or
+            $clients -notcontains "exchangeActiveSync" -or
+            $clients -notcontains "other"
+        ) {
+            return $false
+        }
+    }
+
+    $allowedConditions = @("users", "applications", "clientAppTypes", "@odata.type")
+    if ($Risk -eq "SignIn") { $allowedConditions += "signInRiskLevels" }
+    if ($Risk -eq "User") { $allowedConditions += "userRiskLevels" }
+    $conditionNames = if ($conditions -is [System.Collections.IDictionary]) {
+        @($conditions.Keys)
+    }
+    else {
+        @($conditions.PSObject.Properties.Name)
+    }
+    foreach ($name in $conditionNames) {
+        if ($name -in $allowedConditions) { continue }
+        $value = $conditions.$name
+        if ($null -eq $value -or @($value).Count -eq 0) { continue }
+        if (
+            $name -eq "platforms" -and
+            @($value.includePlatforms) -contains "all" -and
+            @($value.excludePlatforms | Where-Object { $_ }).Count -eq 0
+        ) { continue }
+        if (
+            $name -eq "locations" -and
+            @($value.includeLocations) -contains "All" -and
+            @($value.excludeLocations | Where-Object { $_ }).Count -eq 0
+        ) { continue }
+        return $false
+    }
+    $true
+}
+
+function Get-SecureM365MfaPolicyAssessment {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()]
+        [object[]] $Policies = @(),
+        [bool] $SecurityDefaultsEnabled,
+        [switch] $Administrators,
+        [string[]] $RequiredRoleIds = @(),
+        [hashtable] $ApprovedExclusions = @{},
+        [string] $CoverageReadError
+    )
+
+    $matching = @(
+        $Policies | Where-Object {
+            (Test-SecureM365CaRequiresMfa $_) -and
+            (
+                (Test-SecureM365CaTargetsAllUsers $_) -or
+                ($Administrators -and @($_.conditions.users.includeRoles | Where-Object { $_ }).Count -gt 0)
+            )
+        }
+    )
+    foreach ($policy in $matching) {
+        if (
+            [string]::IsNullOrWhiteSpace([string] $policy.id) -or
+            [string]::IsNullOrWhiteSpace([string] $policy.displayName) -or
+            $policy.state -notin @("enabled", "disabled", "enabledForReportingButNotEnforced")
+        ) {
+            throw "A matching MFA policy has missing identity data or an unrecognized state. Its configuration cannot be verified."
+        }
+    }
+    $enabled = @($matching | Where-Object state -eq "enabled")
+    $configured = $SecurityDefaultsEnabled -or $enabled.Count -gt 0
+    $audience = if ($Administrators) { "all users or directory roles" } else { "all users" }
+    $policyEvidence = if ($SecurityDefaultsEnabled) {
+        "Security defaults is enabled."
+    }
+    elseif ($enabled.Count -gt 0) {
+        "Enabled MFA policy found: " + (($enabled | ForEach-Object {
+            "'$($_.displayName)' (ID: $($_.id), state: $($_.state))"
+        }) -join "; ") + "."
+    }
+    elseif ($matching.Count -gt 0) {
+        "MFA policy found, but not enabled: " + (($matching | ForEach-Object {
+            "'$($_.displayName)' (ID: $($_.id), state: $($_.state))"
+        }) -join "; ") + ". Disabled and report-only policies do not enforce MFA."
+    }
+    else {
+        "No matching MFA policy directly targets $audience, and security defaults is disabled. A policy name or MFA OR a non-MFA grant is not sufficient."
+    }
+
+    $broadPolicies = @($enabled | Where-Object {
+        Test-SecureM365CaPolicyScope -Policy $_ -ApprovedExclusions $ApprovedExclusions
+    })
+    $allUsersCovered = @($broadPolicies | Where-Object {
+        Test-SecureM365CaTargetsAllUsers $_
+    }).Count -gt 0
+    $coveredRoles = @(
+        foreach ($policy in $broadPolicies) {
+            @($policy.conditions.users.includeRoles) |
+                Where-Object { $_ -and $_ -notin @($policy.conditions.users.excludeRoles) }
+        }
+    )
+    $missingRoles = @($RequiredRoleIds | Where-Object { $_ -notin $coveredRoles })
+    $coverageVerified = if ($SecurityDefaultsEnabled -or $allUsersCovered) {
+        $missingRoles = @()
+        $true
+    }
+    elseif ($Administrators -and ($RequiredRoleIds.Count -eq 0 -or $CoverageReadError)) {
+        $null
+    }
+    else {
+        $Administrators -and $missingRoles.Count -eq 0
+    }
+    $coverageEvidence = if ($coverageVerified -eq $true) {
+        "Coverage advisory: broad MFA protection with only approved exclusions was verified."
+    }
+    elseif ($null -eq $coverageVerified) {
+        "Coverage advisory: administrator role coverage could not be evaluated. $CoverageReadError".Trim()
+    }
+    else {
+        "Coverage advisory: broad protection was NOT verified. Review role coverage, resource/client/risk conditions, and unapproved exclusions."
+    }
+
+    $policySummaries = @(
+        foreach ($policy in $matching) {
+            [pscustomobject]@{
+                Id = [string] $policy.id
+                DisplayName = [string] $policy.displayName
+                State = [string] $policy.state
+                TargetsAllUsers = Test-SecureM365CaTargetsAllUsers $policy
+                IncludedRoleIds = @($policy.conditions.users.includeRoles | Where-Object { $_ })
+                ExcludedUserIds = @($policy.conditions.users.excludeUsers | Where-Object { $_ })
+                ExcludedGroupIds = @($policy.conditions.users.excludeGroups | Where-Object { $_ })
+                ExcludedRoleIds = @($policy.conditions.users.excludeRoles | Where-Object { $_ })
+                ExcludesGuestsOrExternalUsers = $null -ne $policy.conditions.users.excludeGuestsOrExternalUsers
+                ExclusionsApproved = Test-SecureM365CaHasOnlyApprovedExclusions -Policy $policy @ApprovedExclusions
+            }
+        }
+    )
+    $exclusions = @(
+        foreach ($policy in $policySummaries | Where-Object State -eq "enabled") {
+            if (
+                $policy.ExcludedUserIds.Count -gt 0 -or
+                $policy.ExcludedGroupIds.Count -gt 0 -or
+                $policy.ExcludedRoleIds.Count -gt 0 -or
+                $policy.ExcludesGuestsOrExternalUsers
+            ) {
+                "'$($policy.DisplayName)': excluded users=[$($policy.ExcludedUserIds -join ', ')]; " +
+                "groups=[$($policy.ExcludedGroupIds -join ', ')]; roles=[$($policy.ExcludedRoleIds -join ', ')]; " +
+                "guests/external=$($policy.ExcludesGuestsOrExternalUsers); approved=$($policy.ExclusionsApproved)"
+            }
+        }
+    )
+    $exclusionEvidence = if ($exclusions.Count -gt 0) {
+        "Exclusion advisory: $($exclusions -join '; '). Exclusions do not change the enabled-policy result."
+    }
+    else {
+        "Exclusion advisory: no exclusions found on matching enabled Conditional Access policies."
+    }
+
+    [pscustomobject]@{
+        Status = if ($configured) { "IMPLEMENTED" } else { "NOT-CONFIGURED" }
+        AssessmentBasis = "Enabled MFA configuration, not complete sign-in coverage"
+        PolicyFound = $matching.Count -gt 0
+        EnabledPolicyFound = $enabled.Count -gt 0
+        SecurityDefaultsEnabled = $SecurityDefaultsEnabled
+        ProtectionConfigured = $configured
+        Resolved = $configured
+        CoverageVerified = $coverageVerified
+        MissingAdministrativeRoles = $missingRoles
+        Policies = $policySummaries
+        CoverageEvidence = $coverageEvidence
+        ExclusionEvidence = $exclusionEvidence
+        Evidence = "$policyEvidence This checks configuration, not every account or sign-in. $coverageEvidence $exclusionEvidence"
+    }
 }
 
 function Test-SecureM365CaUsesEveryTimeSignInFrequency {
@@ -916,7 +1141,10 @@ function Get-SecureM365SecurityDefaultsEnabled {
         -Method GET `
         -Uri 'https://graph.microsoft.com/v1.0/policies/identitySecurityDefaultsEnforcementPolicy' `
         -ErrorAction Stop
-    $policy.isEnabled -eq $true
+    if ($policy.isEnabled -isnot [bool]) {
+        throw "The security defaults response did not contain a Boolean isEnabled value."
+    }
+    $policy.isEnabled
 }
 
 function Reset-SecureM365ScoreCache {
@@ -1260,6 +1488,8 @@ Export-ModuleMember -Function @(
     "Test-SecureM365CaHasOnlyApprovedExclusions"
     "Test-SecureM365CaTargetsAllResources"
     "Test-SecureM365CaRequiresMfa"
+    "Test-SecureM365CaPolicyScope"
+    "Get-SecureM365MfaPolicyAssessment"
     "Test-SecureM365CaUsesEveryTimeSignInFrequency"
     "Get-SecureM365SecurityDefaultsEnabled"
     "Reset-SecureM365ScoreCache"

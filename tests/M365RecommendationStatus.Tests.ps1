@@ -25,21 +25,42 @@ foreach ($statement in $ast.EndBlock.Statements) {
     }
 }
 
-function Test-ReportPolicyScope { $true }
-function Test-ReportMfaGrant { $true }
-function Test-SecureM365CaTargetsAllUsers { $true }
+$commonAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $scriptsRoot "SecureM365.Common.psm1"), [ref] $null, [ref] $null
+)
+foreach ($statement in $commonAst.EndBlock.Statements) {
+    if (
+        $statement -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $statement.Name -in @(
+            "Test-SecureM365CaTargetsAllUsers"
+            "Test-SecureM365CaHasOnlyApprovedExclusions"
+            "Test-SecureM365CaTargetsAllResources"
+            "Test-SecureM365CaRequiresMfa"
+            "Test-SecureM365CaPolicyScope"
+            "Get-SecureM365MfaPolicyAssessment"
+        )
+    ) {
+        . ([scriptblock]::Create($statement.Extent.Text))
+    }
+}
 
 Describe "Script 99 MFA enforcement assessment" {
     BeforeEach {
         $script:readFailures = @{}
+        $script:approvedExclusions = @{}
         $script:data = @{
             SecurityDefaults = @{ isEnabled = $false }
             ConditionalAccess = @(
                 @{
+                    id = "44444444-4444-4444-8444-444444444444"
                     displayName = "Enforced MFA"
                     state = "enabled"
-                    conditions = @{ users = @{ includeUsers = @("All") } }
-                    grantControls = @{ builtInControls = @("mfa") }
+                    conditions = @{
+                        users = @{ includeUsers = @("All") }
+                        applications = @{ includeApplications = @("All"); excludeApplications = @() }
+                        clientAppTypes = @("all")
+                    }
+                    grantControls = @{ operator = "OR"; builtInControls = @("mfa") }
                 }
             )
             Users = @(
@@ -66,7 +87,10 @@ Describe "Script 99 MFA enforcement assessment" {
     It "reports enforced all-user MFA implemented despite incomplete registration" {
         $result = Get-MfaAssessment
         $result.Status | Should Be "IMPLEMENTED"
-        $result.Details | Should Match "policy enforcement is verified"
+        $result.PolicyConfiguration.PolicyFound | Should Be $true
+        $result.PolicyConfiguration.EnabledPolicyFound | Should Be $true
+        $result.PolicyConfiguration.CoverageVerified | Should Be $true
+        $result.Details | Should Match "Enabled MFA policy found"
         $result.Details | Should Match "not reported MFA-capable"
         $result.Details | Should Match "36 hours"
     }
@@ -75,7 +99,7 @@ Describe "Script 99 MFA enforcement assessment" {
         $script:readFailures["Registration"] = "fixture report unavailable"
         $result = Get-MfaAssessment -Administrators
         $result.Status | Should Be "IMPLEMENTED"
-        $result.Details | Should Match "Policy enforcement remains verified"
+        $result.Details | Should Match "enabled-policy result is unchanged"
         $result.Details | Should Match "fixture report unavailable"
     }
 

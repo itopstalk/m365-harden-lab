@@ -14,13 +14,18 @@ Complex combinations of narrower policies may need manual review.
 Every run also writes the structured results to a timestamped JSON file under
 C:\SecureM365Snapshots by default, creating that directory when necessary.
 
-MFA policy enforcement determines the status of the two MFA recommendations.
+The two MFA recommendations check for enabled MFA configuration, not complete
+coverage or user registration. Administrator MFA matches a policy targeting
+directory roles or all users; all-user MFA requires a policy targeting All users.
+Security Defaults also satisfies these configuration checks. Policy names, IDs,
+states, exclusions, and a separate coverage advisory are included in the evidence.
+An IMPLEMENTED MFA result does not prove every account or sign-in is protected.
 For SSPR, Microsoft Graph does not expose the exact Password reset > Properties
 scope. SsprAllScopeConfirmed defaults to true, recording the lab operator's
 confirmation without requiring a flag on every run. Set it explicitly to false
 for a tenant where All has not been verified. Authentication-method registration
 data is included as an advisory readiness note for MFA and SSPR and does not
-downgrade verified policy evidence. The registration report requires Entra ID
+downgrade verified configuration evidence. The registration report requires Entra ID
 P1/P2 and can lag changes by up to 36 hours.
 Teams checks intentionally assess only the org-wide Global meeting policy, which
 scripts 40, 42, and 44 configure. Custom meeting policies and their user/group
@@ -33,7 +38,9 @@ checked against that tenant before its configuration is read.
 
 .PARAMETER ApprovedExcludedUserId
 Explicitly approved Conditional Access user exclusions, such as the object IDs
-returned by script 04. Does not exempt these users from MFA registration checks.
+returned by script 04. For MFA, these affect only the coverage advisory, not
+policy detection. Other Conditional Access recommendations still require approved
+exclusions. Does not omit these users from the registration advisory.
 
 .PARAMETER ApprovedExcludedGroupId
 Explicitly approved Conditional Access group exclusions.
@@ -70,6 +77,8 @@ Path to a PFX outside this repository.
 .PARAMETER PassThru
 Also return the 10 structured result objects for filtering or export. Each
 result includes Evidence; Details contains the same value for compatibility.
+MFA results also include PolicyConfiguration with PolicyFound, EnabledPolicyFound,
+CoverageVerified, and matching policy details. These are also saved in the snapshot.
 
 .NOTES
 The script loads its datasets before printing check 1, so data-read warnings can
@@ -150,13 +159,16 @@ function New-Assessment {
         [string] $Status,
 
         [Parameter(Mandatory)]
-        [string] $Details
+        [string] $Details,
+
+        [psobject] $PolicyConfiguration
     )
     [pscustomobject]@{
         Status   = $Status
         Evidence = $Details
         # Retained for consumers of earlier script versions.
         Details  = $Details
+        PolicyConfiguration = $PolicyConfiguration
     }
 }
 
@@ -222,35 +234,7 @@ function Get-CheckedSecurityDefaults {
 function Test-ReportMfaGrant {
     param([Parameter(Mandatory)] $Policy)
 
-    $grant = $Policy.grantControls
-    $controls = @($grant.builtInControls | Where-Object { $_ })
-    $strength = $grant.authenticationStrength
-    $hasMfaStrength =
-        $strength.requirementsSatisfied -eq "mfa" -or
-        $strength.id -in @(
-            "00000000-0000-0000-0000-000000000002"
-            "00000000-0000-0000-0000-000000000003"
-            "00000000-0000-0000-0000-000000000004"
-        )
-    if (
-        $controls -contains "block" -or
-        (-not $hasMfaStrength -and $controls -notcontains "mfa")
-    ) {
-        return $false
-    }
-    if ($grant.operator -eq "AND") {
-        return $true
-    }
-    if ($grant.operator -ne "OR") {
-        return $false
-    }
-
-    # An OR alternative such as a compliant device lets the user bypass MFA.
-    $alternatives = @($controls | Where-Object { $_ -ne "mfa" })
-    $alternatives.Count -eq 0 -and
-        @($grant.termsOfUse | Where-Object { $_ }).Count -eq 0 -and
-        @($grant.customAuthenticationFactors | Where-Object { $_ }).Count -eq 0 -and
-        ($null -eq $strength -or $hasMfaStrength)
+    Test-SecureM365CaRequiresMfa $Policy
 }
 
 function Test-ReportPolicyScope {
@@ -260,61 +244,8 @@ function Test-ReportPolicyScope {
         [switch] $Legacy
     )
 
-    if (
-        $Policy.state -ne "enabled" -or
-        -not (Test-SecureM365CaHasOnlyApprovedExclusions -Policy $Policy @approvedExclusions) -or
-        -not (Test-SecureM365CaTargetsAllResources $Policy)
-    ) {
-        return $false
-    }
-
-    $conditions = $Policy.conditions
-    $apps = $conditions.applications
-    if (
-        $null -ne $apps.applicationFilter -or
-        @($apps.includeUserActions | Where-Object { $_ }).Count -gt 0 -or
-        @($apps.includeAuthenticationContextClassReferences | Where-Object { $_ }).Count -gt 0
-    ) {
-        return $false
-    }
-
-    $clients = @($conditions.clientAppTypes)
-    if ($clients -notcontains "all") {
-        if (
-            -not $Legacy -or
-            $clients -notcontains "exchangeActiveSync" -or
-            $clients -notcontains "other"
-        ) {
-            return $false
-        }
-    }
-
-    $allowedConditions = @("users", "applications", "clientAppTypes", "@odata.type")
-    if ($Risk -eq "SignIn") { $allowedConditions += "signInRiskLevels" }
-    if ($Risk -eq "User") { $allowedConditions += "userRiskLevels" }
-    $conditionNames = if ($conditions -is [System.Collections.IDictionary]) {
-        @($conditions.Keys)
-    }
-    else {
-        @($conditions.PSObject.Properties.Name)
-    }
-    foreach ($name in $conditionNames) {
-        if ($name -in $allowedConditions) { continue }
-        $value = $conditions.$name
-        if ($null -eq $value -or @($value).Count -eq 0) { continue }
-        if (
-            $name -eq "platforms" -and
-            @($value.includePlatforms) -contains "all" -and
-            @($value.excludePlatforms | Where-Object { $_ }).Count -eq 0
-        ) { continue }
-        if (
-            $name -eq "locations" -and
-            @($value.includeLocations) -contains "All" -and
-            @($value.excludeLocations | Where-Object { $_ }).Count -eq 0
-        ) { continue }
-        return $false
-    }
-    $true
+    Test-SecureM365CaPolicyScope -Policy $Policy -ApprovedExclusions $approvedExclusions `
+        -Risk $Risk -Legacy:$Legacy
 }
 
 function Get-RegistrationCoverage {
@@ -375,23 +306,21 @@ function Get-MfaAssessment {
     param([switch] $Administrators)
 
     $securityDefaults = Get-CheckedSecurityDefaults
-    $protection = $securityDefaults
-    $policyEvidence = "Security defaults is enabled."
-    if (-not $securityDefaults) {
-        $policies = @(Get-CheckData "ConditionalAccess")
-        $mfaPolicies = @(
-            $policies | Where-Object {
-                (Test-ReportPolicyScope $_) -and (Test-ReportMfaGrant $_)
-            }
-        )
-        $allUserPolicies = @($mfaPolicies | Where-Object { Test-SecureM365CaTargetsAllUsers $_ })
-        $protection = $allUserPolicies.Count -gt 0
-        $policyEvidence = "Enforced policy: $($allUserPolicies.displayName -join ', ')."
-        if ($Administrators -and -not $protection) {
+    $policyReadFailed = $securityDefaults -and $readFailures.ContainsKey("ConditionalAccess")
+    $policies = @(if (-not $policyReadFailed) { Get-CheckData "ConditionalAccess" })
+    $parameters = @{
+        Policies = @($policies)
+        SecurityDefaultsEnabled = $securityDefaults
+        Administrators = $Administrators
+        ApprovedExclusions = $approvedExclusions
+    }
+    $policyAssessment = Get-SecureM365MfaPolicyAssessment @parameters
+    if ($Administrators -and $null -eq $policyAssessment.CoverageVerified) {
+        try {
             $roles = @(Get-CheckData "RoleDefinitions")
             $assignments = @(Get-CheckData "RoleAssignments")
             if ($assignments.Count -eq 0) { throw "No active role assignments were returned." }
-            $requiredRoleIds = @(
+            $parameters.RequiredRoleIds = @(
                 foreach ($assignment in $assignments) {
                     $role = @($roles | Where-Object { $_.id -eq $assignment.roleDefinitionId })
                     if (
@@ -399,32 +328,26 @@ function Get-MfaAssessment {
                         $role[0].isBuiltIn -ne $true -or
                         [string]::IsNullOrWhiteSpace($role[0].templateId)
                     ) {
-                        throw "An assigned role could not be resolved to a built-in template. Verify administrator MFA coverage manually."
+                        throw "An assigned role could not be resolved to a built-in template."
                     }
                     $role[0].templateId
                 }
-            ) | Sort-Object -Unique
-            $coveredRoleIds = @(
-                foreach ($policy in $mfaPolicies) {
-                    @($policy.conditions.users.includeRoles) |
-                        Where-Object { $_ -notin @($policy.conditions.users.excludeRoles) }
-                }
-            )
-            $missingRoles = @($requiredRoleIds | Where-Object { $_ -notin $coveredRoleIds })
-            $protection = $requiredRoleIds.Count -gt 0 -and $missingRoles.Count -eq 0
-            $policyEvidence = "Enforced MFA policies cover all $($requiredRoleIds.Count) currently assigned role templates."
+            ) | Select-Object -Unique
         }
-        if (-not $protection) {
-            $narrowMfaPolicies = @(
-                $policies | Where-Object {
-                    $_.state -eq "enabled" -and (Test-ReportMfaGrant $_)
-                }
-            )
-            if ($narrowMfaPolicies.Count -gt 0) {
-                return New-Assessment "UNKNOWN" "MFA policies exist, but broad coverage with only approved exclusions was not verified. Review scopes, exclusions, and combinations of narrower policies."
-            }
-            return New-Assessment "NOT-CONFIGURED" "Security defaults is disabled and no enabled policy unconditionally requires MFA. Report-only policies and MFA OR a non-MFA grant do not count."
+        catch {
+            $parameters.CoverageReadError = $_.Exception.Message
+            Write-Warning "Administrator MFA coverage could not be evaluated: $($parameters.CoverageReadError)"
         }
+        $policyAssessment = Get-SecureM365MfaPolicyAssessment @parameters
+    }
+    if ($policyReadFailed) {
+        $policyAssessment.PolicyFound = $null
+        $policyAssessment.EnabledPolicyFound = $null
+        $policyAssessment.Evidence += " Conditional Access policy inventory is unavailable: $($readFailures['ConditionalAccess']). Security Defaults independently verifies the MFA configuration."
+    }
+    if ($policyAssessment.Status -ne "IMPLEMENTED") {
+        return New-Assessment $policyAssessment.Status $policyAssessment.Evidence `
+            -PolicyConfiguration $policyAssessment
     }
 
     try {
@@ -432,17 +355,18 @@ function Get-MfaAssessment {
         $missing = @($coverage | Where-Object { $_.Registration.isMfaCapable -isnot [bool] })
         $notCapable = @($coverage | Where-Object { $_.Registration.isMfaCapable -eq $false })
         $registrationNote = if ($notCapable.Count -gt 0 -or $missing.Count -gt 0) {
-            "Registration note: policy enforcement is verified, but $($notCapable.Count) of $($coverage.Count) checked enabled accounts are not reported MFA-capable and $($missing.Count) have missing data. Registration data can lag by up to 36 hours."
+            "Registration advisory: $($notCapable.Count) of $($coverage.Count) checked enabled accounts are not reported MFA-capable and $($missing.Count) have missing data. Registration data can lag by up to 36 hours and does not determine the enabled-policy result."
         }
         else {
-            "Registration note: all $($coverage.Count) checked enabled accounts are reported MFA-capable, including any emergency accounts."
+            "Registration advisory: all $($coverage.Count) checked enabled accounts are reported MFA-capable, including any emergency accounts."
         }
     }
     catch {
-        $registrationNote = "Registration note: readiness data could not be verified and can lag by up to 36 hours. Policy enforcement remains verified. $($_.Exception.Message)"
+        $registrationNote = "Registration advisory: readiness data could not be verified and can lag by up to 36 hours. The enabled-policy result is unchanged. $($_.Exception.Message)"
     }
 
-    New-Assessment "IMPLEMENTED" "$policyEvidence $registrationNote"
+    New-Assessment "IMPLEMENTED" "$($policyAssessment.Evidence) $registrationNote" `
+        -PolicyConfiguration $policyAssessment
 }
 
 function Get-RiskAssessment {
@@ -667,6 +591,7 @@ $checks = @(
 $checkedAt = [datetimeoffset]::UtcNow
 Write-Host "`nMicrosoft 365 live recommendation status"
 Write-Host "Tenant: $($TenantId.Guid) | Checked at: $($checkedAt.ToString('u'))"
+Write-Host "MFA results check enabled configuration; complete coverage and registration are advisory."
 Write-Host "Registration data can lag by up to 36 hours. UNKNOWN means not verified, not necessarily unconfigured.`n"
 
 $results = @(
@@ -686,6 +611,7 @@ $results = @(
             Evidence       = $assessment.Evidence
             # Retained for consumers of earlier script versions.
             Details        = $assessment.Evidence
+            PolicyConfiguration = $assessment.PolicyConfiguration
             TenantId       = $TenantId.Guid
             CheckedAt      = $checkedAt
         }

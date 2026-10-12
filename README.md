@@ -187,9 +187,9 @@ proof that a Baseline Security Mode setting is enabled.
 Conditional Access, role, consent, Exchange, and Baseline Security Mode changes
 can require propagation and fresh service tokens. Microsoft documents up to
 24 hours for relevant SharePoint legacy-auth changes. The authentication-method
-registration report can lag by up to 36 hours. In script 99, verified policy
-enforcement determines the two MFA recommendation statuses; registration
-coverage is reported separately as an advisory readiness note. The lag does not
+registration report can lag by up to 36 hours. In scripts 11 and 99, an enabled
+matching MFA configuration determines the MFA result; complete policy coverage
+and registration readiness are separate advisories. The lag does not
 affect scripts 62-69 because they do not use registration data. Run Microsoft's
 impact report before enabling a setting; Microsoft recommends enabling only
 after dependencies are remediated and the report shows zero impact.
@@ -484,6 +484,67 @@ Use `-ReportOnly` for staged creation:
 would be **enforced** (default) or **report-only**. Script 20 remains the explicit
 path for enabling a previously staged, reviewed policy; the creation scripts do
 not silently update or enable existing policies.
+
+## MFA policy configuration checks
+
+Script 10 creates an enabled Conditional Access policy; it does not register
+authentication methods for administrators. MFA enforcement does not wait for
+registration or a Secure Score refresh. A sign-in to which the policy applies
+must satisfy its grant, which can require registration or block access until a
+usable method is available.
+
+[Script 11](scripts/11-Test-AdminMfa.ps1) and the two MFA recommendations in
+[script 99](scripts/99-Test-M365RecommendationStatus.ps1) check whether a matching
+MFA policy **exists and is enabled**. Administrator MFA matches policies directly
+targeting directory roles or All users. All-user MFA matches policies targeting
+All users. Detection uses the policy's actual grant and assignments, not its name.
+Security Defaults is also accepted as an enabled MFA configuration.
+
+| Evidence | Meaning |
+| --- | --- |
+| `PolicyFound` | A matching Conditional Access MFA policy was found, even if disabled or report-only. |
+| `EnabledPolicyFound` | At least one matching policy has `state = enabled`. |
+| `ProtectionConfigured` / `Resolved` | An enabled matching policy or enabled Security Defaults was found. |
+| `CoverageVerified` | Separate advisory about broad coverage with only explicitly approved exclusions; null means the role inventory could not be evaluated. |
+| `Policies` | Matching policy IDs, names, states, role targets, and user/group/role exclusions. |
+
+An `IMPLEMENTED` MFA result is a **configuration-presence result**, not proof that
+every administrator, user, resource, or sign-in is protected. Resource, client,
+risk, and exclusion restrictions remain part of the coverage advisory. Disabled
+and report-only policies do not pass. Neither does a grant allowing **MFA OR a
+compliant device**, because MFA is then optional.
+
+```powershell
+.\11-Test-AdminMfa.ps1 -TenantId $TenantId
+$results = .\99-Test-M365RecommendationStatus.ps1 -TenantId $TenantId -PassThru
+$results[0].PolicyConfiguration
+$results[0].PolicyConfiguration.Policies | Format-List
+```
+
+Your approved emergency-account exclusions do not prevent policy detection.
+To have the separate coverage advisory recognise those exclusions, supply the
+same object IDs used with script 10:
+
+```powershell
+.\11-Test-AdminMfa.ps1 -TenantId $TenantId -ApprovedExcludedUserId $EmergencyAccountIds
+.\99-Test-M365RecommendationStatus.ps1 -TenantId $TenantId -ApprovedExcludedUserId $EmergencyAccountIds
+```
+
+Script 11's coverage advisory uses script 10's 16-role baseline. Script 99's
+administrator coverage advisory checks currently assigned role templates, which
+can include additional roles. The other Conditional Access recommendations in
+script 99 still require verified scopes and approved exclusions.
+
+Registration counts, including emergency accounts, are advisory and can lag by
+up to 36 hours. Missing registration or an unavailable registration report does
+not negate an enabled policy. Script 11 no longer appends a Secure Score result:
+the old `ControlFound` meant the control appeared in a score snapshot, not that
+an MFA policy was enabled. Script 99 continues to use live policy data, not
+Secure Score. Its MFA `PolicyConfiguration` details are included in both
+`-PassThru` output and JSON snapshots.
+
+Copy the updated `SecureM365.Common.psm1` together with scripts 11 and 99 when
+running these checks on another system.
 
 ## Teams meeting policy scope
 

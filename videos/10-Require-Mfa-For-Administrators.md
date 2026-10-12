@@ -83,6 +83,14 @@ Use the **Require multifactor authentication** checkbox here, not an authenticat
 
 CA001 is not a promise to cover every possible administrative role. Complete CA002 as well; its all-user policy supplies the additional broad coverage used by the final report.
 
+Scripts 11 and 99 report an enabled matching MFA policy as configured even when
+the emergency accounts are excluded or administrators have not yet registered
+MFA methods. They show the policy ID, name, state, and exclusions. Complete
+coverage and registration readiness are separate advisories, not the pass
+criterion. Use `ApprovedExcludedUserId` with the recorded emergency account IDs
+for the coverage advisory; this is not necessary to detect CA001. A policy found
+in disabled or report-only state does not pass.
+
 ## Related content
 
 - [Require MFA for administrators](https://learn.microsoft.com/entra/identity/conditional-access/policy-old-require-mfa-admin)
