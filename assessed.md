@@ -1,6 +1,6 @@
 # Microsoft 365 Tenant Security Controls
 
-Implement the following security controls in the assigned Microsoft 365 tenant. Policies must be enabled and enforced, not left in report-only mode. Any exclusions, including emergency-access accounts, must be agreed with the assessor.
+Implement the following security controls in the assigned Microsoft 365 tenant. Policies must be enabled and enforced, not left in report-only mode. Exclusions can exist for break glass accounts.
 
 1. **Multifactor authentication for administrative roles**
 
