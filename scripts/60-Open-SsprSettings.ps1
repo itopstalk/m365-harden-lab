@@ -2,4 +2,4 @@
 param()
 
 Start-Process `
-    'https://entra.microsoft.com/#view/Microsoft_AAD_Authentication/PasswordResetMenuBlade/~/Properties'
+    'https://entra.microsoft.com/#view/Microsoft_AAD_IAM/PasswordResetMenuBlade/~/Properties'

@@ -32,7 +32,7 @@ Use the Entra Password reset page, not an individual user's Reset password comma
 5. Select **Save**.
 6. Record that **All** was saved for this tenant in the protected lab record.
 
-If the navigation is difficult to locate, use the same [Password reset Properties page](https://entra.microsoft.com/#view/Microsoft_AAD_Authentication/PasswordResetMenuBlade/~/Properties) opened by script 60.
+If the navigation is difficult to locate, use the same [Password reset Properties page](https://entra.microsoft.com/#view/Microsoft_AAD_IAM/PasswordResetMenuBlade/~/Properties) opened by script 60.
 
 ## Expected configuration and boundaries
 
