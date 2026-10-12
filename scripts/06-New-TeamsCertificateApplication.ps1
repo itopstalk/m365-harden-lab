@@ -281,7 +281,7 @@ try {
     if ($null -ne $connectionError) {
         throw [InvalidOperationException]::new(
             "The application and grants were created, but Teams meeting-policy access could not be verified after six attempts. " +
-            "Allow additional role and consent propagation time, then validate with script 01 before deciding whether to revoke. " +
+            "Allow additional role and consent propagation time, then validate with script 07 before deciding whether to revoke. " +
             "Last error: $($connectionError.Exception.Message)",
             $connectionError.Exception
         )
@@ -313,7 +313,7 @@ catch {
         "DirectoryRoleAssignmentId=$([string] $directoryRoleAssignment.id)"
     ) -join "; "
     $teardown = if (-not [string]::IsNullOrWhiteSpace([string] $application.appId)) {
-        ".\07-Remove-TeamsCertificateApplication.ps1 -TenantId '$($TenantId.Guid)' -ApplicationId '$($application.appId)' -CertificateThumbprint '$([string] $certificate.Thumbprint)' -RemoveLocalCertificate"
+        ".\08-Remove-TeamsCertificateApplication.ps1 -TenantId '$($TenantId.Guid)' -ApplicationId '$($application.appId)' -CertificateThumbprint '$([string] $certificate.Thumbprint)' -RemoveLocalCertificate"
     }
     else {
         "Remove the local certificate '$([string] $certificate.Thumbprint)' from Cert:\CurrentUser\My after verifying it belongs to this failed setup."

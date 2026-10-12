@@ -12,7 +12,7 @@ Retire the cloud identity created by procedure 06. This is optional cleanup afte
 
 **Admin tool:** [Microsoft Entra admin center](https://entra.microsoft.com).
 
-**Script mapping:** [07-Remove-TeamsCertificateApplication.ps1](../scripts/07-Remove-TeamsCertificateApplication.ps1).
+**Script mapping:** [08-Remove-TeamsCertificateApplication.ps1](../scripts/08-Remove-TeamsCertificateApplication.ps1).
 
 ## Prerequisites
 
@@ -38,7 +38,7 @@ Match identifiers, not only the display name, before removing a grant.
 8. Select the assignment and select **Remove**.
 9. Confirm the removal.
 
-If the application acquired additional directory roles after setup, review and remove those assignments to this exact service principal as well. Script 07 removes all of that principal's directory-role assignments, not roles belonging to its owners or other applications.
+If the application acquired additional directory roles after setup, review and remove those assignments to this exact service principal as well. Script 08 removes all of that principal's directory-role assignments, not roles belonging to its owners or other applications.
 
 ## Delete the enterprise application and app registration
 
@@ -61,7 +61,7 @@ If a cloud object was already removed, skip only its corresponding deletion afte
 
 The dedicated service principal, app registration, application-permission grants, and directory-role assignments are removed. The Global Teams meeting policy settings from procedures 40, 42, and 44 remain unchanged.
 
-This reproduces the cloud cleanup outcome of script 07. It does **not** reproduce the optional `RemoveLocalCertificate` operation: a browser cannot delete the certificate or private key in `Cert:\CurrentUser\My`. Arrange separate approved local cleanup of that exact thumbprint if required. Do not assume deleting the uploaded certificate or app deletes local private-key material.
+This reproduces the cloud cleanup outcome of script 08. It does **not** reproduce the optional `RemoveLocalCertificate` operation: a browser cannot delete the certificate or private key in `Cert:\CurrentUser\My`. Arrange separate approved local cleanup of that exact thumbprint if required. Do not assume deleting the uploaded certificate or app deletes local private-key material.
 
 The final report can still run using delegated Teams authentication. Do not continue supplying the deleted application's client ID to it.
 

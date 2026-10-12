@@ -28,10 +28,10 @@ Thumbprint of the local certificate. Required with RemoveLocalCertificate.
 Also remove the exact matching CurrentUser certificate after cloud revocation.
 
 .EXAMPLE
-.\07-Remove-TeamsCertificateApplication.ps1 -TenantId $TenantId -ApplicationId $ApplicationId -WhatIf
+.\08-Remove-TeamsCertificateApplication.ps1 -TenantId $TenantId -ApplicationId $ApplicationId -WhatIf
 
 .EXAMPLE
-.\07-Remove-TeamsCertificateApplication.ps1 -TenantId $TenantId -ApplicationId $ApplicationId -CertificateThumbprint $Thumbprint -RemoveLocalCertificate
+.\08-Remove-TeamsCertificateApplication.ps1 -TenantId $TenantId -ApplicationId $ApplicationId -CertificateThumbprint $Thumbprint -RemoveLocalCertificate
 
 .LINK
 https://learn.microsoft.com/microsoftteams/teams-powershell-application-authentication

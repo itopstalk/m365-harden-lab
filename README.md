@@ -249,8 +249,36 @@ through the resulting application connection. It never changes a colliding
 identity. If setup fails after a write, its terminating error lists the object
 IDs already created and an exact teardown command; it does not hide or silently
 roll back partial state. Role and consent propagation can delay the final
-connection—review the IDs before deciding whether to wait and retry script 01 or
+connection—review the IDs before deciding whether to wait and retry script 07 or
 revoke the partial setup.
+
+Use [script 07](scripts/07-Test-TeamsCertificateApplication.ps1) to recheck the
+existing application's certificate authentication and Global meeting-policy
+read access without running setup again:
+
+```powershell
+.\07-Test-TeamsCertificateApplication.ps1 -TenantId $TenantId `
+    -ApplicationId $TeamsApplicationId `
+    -CertificateThumbprint $TeamsCertificateThumbprint
+```
+
+Run in PowerShell 7.2 or later with `MicrosoftTeams` installed and
+`SecureM365.Common.psm1` beside script 07. It checks the local certificate's
+private key and validity, connects explicitly as the application, verifies the
+tenant, and reads exactly the Global policy. Only then does it return
+`Status = PASSED` and `MeetingPolicyAccessVerified = True`; failures terminate
+with an error. It needs no delegated Graph sign-in and changes no tenant settings.
+This verifies read access, not policy configuration, exact role assignments, or
+write authorization. The Teams connection remains available afterward.
+
+On a separate test system, use the Windows user and machine where script 06
+was run. Copying the scripts, application ID, and thumbprint does not copy its
+non-exportable private key. If a different certificate has been deliberately
+deployed and registered on the application, script 07 also accepts
+`-CertificatePath` and an optional runtime `-CertificatePassword` SecureString
+for a PFX outside the repository. No certificate export or import is performed.
+After role or consent changes, allow propagation and retry in a new PowerShell
+process.
 
 Pass the same non-secret application ID and thumbprint to every new PowerShell
 process. Script 01 verifies tenant and policy access; scripts 40-45 and 99 route
@@ -308,20 +336,20 @@ parameter is supplied, the module requires a nonempty application ID and exactly
 one thumbprint or PFX path; invalid or incomplete application authentication
 fails before `Connect-MicrosoftTeams` and never falls back to delegated sign-in.
 The returned Teams tenant ID must exactly match `-TenantId`, and scripts 01, 05,
-and 99 validate meeting-policy reads.
+07, and 99 validate meeting-policy reads.
 
 For rotation in this lab, create a separately named application/certificate,
-verify it with script 01, update scheduled commands to the new application ID
+verify it with script 07, update scheduled commands to the new application ID
 and thumbprint, then revoke the old identity. Script 06 deliberately refuses to
 mutate an existing application, so it cannot accidentally replace a live
 credential. Preview revocation and then remove cloud grants/objects; include the
 switch only when the exact local certificate should also be deleted:
 
 ```powershell
-.\07-Remove-TeamsCertificateApplication.ps1 -TenantId $TenantId `
+.\08-Remove-TeamsCertificateApplication.ps1 -TenantId $TenantId `
     -ApplicationId $TeamsApplicationId -WhatIf
 
-.\07-Remove-TeamsCertificateApplication.ps1 -TenantId $TenantId `
+.\08-Remove-TeamsCertificateApplication.ps1 -TenantId $TenantId `
     -ApplicationId $TeamsApplicationId `
     -CertificateThumbprint $TeamsCertificateThumbprint `
     -RemoveLocalCertificate
