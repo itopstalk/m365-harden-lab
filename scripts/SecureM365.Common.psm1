@@ -1005,27 +1005,55 @@ function Get-SecureM365MfaPolicyAssessment {
         [Parameter(ParameterSetName = "Mfa")]
         [string] $CoverageReadError,
         [Parameter(Mandatory, ParameterSetName = "SignInRisk")]
-        [switch] $SignInRisk
+        [switch] $SignInRisk,
+        [Parameter(Mandatory, ParameterSetName = "UserRisk")]
+        [switch] $UserRisk
     )
 
-    $policyKind = if ($SignInRisk) { "sign-in risk MFA" } else { "MFA" }
-    $scopeRisk = if ($SignInRisk) { "SignIn" } else { "None" }
-    $securityDefaultsAccepted = -not $SignInRisk -and $SecurityDefaultsEnabled
+    $isRiskPolicy = $SignInRisk -or $UserRisk
+    $policyKind = if ($UserRisk) { "user risk remediation" } elseif ($SignInRisk) { "sign-in risk MFA" } else { "MFA" }
+    $scopeRisk = if ($UserRisk) { "User" } elseif ($SignInRisk) { "SignIn" } else { "None" }
+    $securityDefaultsAccepted = -not $isRiskPolicy -and $SecurityDefaultsEnabled
     $matching = @(
         $Policies | Where-Object {
-            (Test-SecureM365CaRequiresMfa $_) -and
+            $policy = $_
+            $remediations = @($policy.grantControls.builtInControls | Where-Object {
+                $_ -in @("passwordChange", "riskRemediation")
+            })
+            (Test-SecureM365CaRequiresMfa $policy) -and
             (
-                (Test-SecureM365CaTargetsAllUsers $_) -or
-                ($Administrators -and @($_.conditions.users.includeRoles | Where-Object { $_ }).Count -gt 0)
+                (Test-SecureM365CaTargetsAllUsers $policy) -or
+                ($Administrators -and @($policy.conditions.users.includeRoles | Where-Object { $_ }).Count -gt 0)
+            ) -and
+            (
+                -not $isRiskPolicy -or
+                (
+                    $policy.sessionControls.signInFrequency.isEnabled -is [bool] -and
+                    (Test-SecureM365CaUsesEveryTimeSignInFrequency $policy) -and
+                    $policy.sessionControls.signInFrequency.authenticationType -eq "primaryAndSecondaryAuthentication"
+                )
             ) -and
             (
                 -not $SignInRisk -or
                 (
-                    @($_.conditions.signInRiskLevels) -contains "medium" -and
-                    @($_.conditions.signInRiskLevels) -contains "high" -and
-                    $_.sessionControls.signInFrequency.isEnabled -is [bool] -and
-                    (Test-SecureM365CaUsesEveryTimeSignInFrequency $_) -and
-                    $_.sessionControls.signInFrequency.authenticationType -eq "primaryAndSecondaryAuthentication"
+                    @($policy.conditions.signInRiskLevels) -contains "medium" -and
+                    @($policy.conditions.signInRiskLevels) -contains "high"
+                )
+            ) -and
+            (
+                -not $UserRisk -or
+                (
+                    @($policy.conditions.userRiskLevels) -contains "high" -and
+                    $policy.grantControls.operator -eq "AND" -and
+                    $remediations.Count -eq 1 -and
+                    (
+                        $remediations -notcontains "riskRemediation" -or
+                        (
+                            # Authentication strength cannot be combined with the built-in MFA grant.
+                            $null -ne $policy.grantControls.authenticationStrength -and
+                            @($policy.grantControls.builtInControls) -notcontains "mfa"
+                        )
+                    )
                 )
             )
         }
@@ -1055,14 +1083,17 @@ function Get-SecureM365MfaPolicyAssessment {
             "'$($_.displayName)' (ID: $($_.id), state: $($_.state))"
         }) -join "; ") + ". Disabled and report-only policies do not enforce MFA."
     }
-    elseif ($SignInRisk) {
-        "No matching sign-in risk MFA policy directly targets all users. A policy name or MFA OR a non-MFA grant is not sufficient."
+    elseif ($isRiskPolicy) {
+        "No matching $policyKind policy directly targets all users. A policy name or optional grant is not sufficient."
     }
     else {
         "No matching MFA policy directly targets $audience, and security defaults is disabled. A policy name or MFA OR a non-MFA grant is not sufficient."
     }
     if ($SignInRisk) {
         $policyEvidence += " Matching requires All users, medium and high sign-in risk, MFA, and every-time primary-and-secondary reauthentication. Security Defaults alone does not satisfy this check."
+    }
+    elseif ($UserRisk) {
+        $policyEvidence += " Matching requires All users, high user risk, MFA AND exactly one remediation control (passwordChange or riskRemediation), and every-time primary-and-secondary reauthentication. Modern riskRemediation requires an MFA authentication strength. Security Defaults alone does not satisfy this check."
     }
 
     $broadPolicies = @($enabled | Where-Object {
@@ -1114,6 +1145,16 @@ function Get-SecureM365MfaPolicyAssessment {
             }
             if ($SignInRisk) {
                 $summary.SignInRiskLevels = @($policy.conditions.signInRiskLevels)
+            }
+            if ($UserRisk) {
+                $summary.UserRiskLevels = @($policy.conditions.userRiskLevels)
+                $summary.RemediationControl = @($policy.grantControls.builtInControls | Where-Object {
+                    $_ -in @("passwordChange", "riskRemediation")
+                })[0]
+                $summary.GrantOperator = $policy.grantControls.operator
+                $summary.AuthenticationStrengthId = $policy.grantControls.authenticationStrength.id
+            }
+            if ($isRiskPolicy) {
                 $summary.SignInFrequency = [pscustomobject]@{
                     IsEnabled = $policy.sessionControls.signInFrequency.isEnabled
                     FrequencyInterval = $policy.sessionControls.signInFrequency.frequencyInterval
@@ -1149,7 +1190,7 @@ function Get-SecureM365MfaPolicyAssessment {
         AssessmentBasis = "Enabled $policyKind configuration, not complete sign-in coverage"
         PolicyFound = $matching.Count -gt 0
         EnabledPolicyFound = $enabled.Count -gt 0
-        SecurityDefaultsEnabled = if ($SignInRisk) { $null } else { $SecurityDefaultsEnabled }
+        SecurityDefaultsEnabled = if ($isRiskPolicy) { $null } else { $SecurityDefaultsEnabled }
         ProtectionConfigured = $configured
         Resolved = $configured
         CoverageVerified = $coverageVerified

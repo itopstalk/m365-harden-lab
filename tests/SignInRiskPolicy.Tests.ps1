@@ -306,16 +306,19 @@ Describe "Sign-in risk detection using script 16's actual payload (offline)" {
         (Invoke-SignInRiskPolicyCheck "99").Status | Should Be "IMPLEMENTED"
     }
 
-    It "retains strict user-risk exclusion checking in script 99" {
+    It "assesses user-risk presence separately from coverage and sign-in risk" {
         $script:policy.conditions.signInRiskLevels = @()
         $script:policy.conditions.userRiskLevels = @("high")
         $script:policy.grantControls.operator = "AND"
         $script:policy.grantControls.builtInControls = @("riskRemediation")
-        (Get-RiskAssessment -Risk User).Status | Should Be "UNKNOWN"
+        $result = Get-RiskAssessment -Risk User
+        $result.Status | Should Be "IMPLEMENTED"
+        $result.PolicyConfiguration.CoverageVerified | Should Be $false
+        (Get-RiskAssessment -Risk SignIn).Status | Should Be "NOT-CONFIGURED"
         $script:approvedExclusions = @{ ApprovedExcludedUserIds = @($script:emergencyIds.Guid) }
-        (Get-RiskAssessment -Risk User).Status | Should Be "IMPLEMENTED"
+        (Get-RiskAssessment -Risk User).PolicyConfiguration.CoverageVerified | Should Be $true
         $script:policy.sessionControls.signInFrequency.authenticationType = "secondaryAuthentication"
-        (Get-RiskAssessment -Risk User).Status | Should Be "UNKNOWN"
+        (Get-RiskAssessment -Risk User).Status | Should Be "NOT-CONFIGURED"
     }
 
     It "persists risk levels and reauthentication settings in script 99 snapshots" {

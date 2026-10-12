@@ -24,8 +24,12 @@ These checks share the policy evaluator used by scripts 11 and 13, including
 script 12's built-in MFA authentication strength.
 The sign-in risk check shares script 17's enabled-policy assessment. It requires
 All users, medium and high sign-in risk, MFA, and every-time primary-and-secondary
-reauthentication. Coverage and exclusions are advisory; Security Defaults does
-not satisfy this check. No risky sign-in event or registration report is needed.
+reauthentication. The user-risk check shares script 19's enabled-policy assessment:
+All users, high user risk, MFA AND exactly one remediation control, and every-time
+primary-and-secondary reauthentication. It accepts passwordChange and modern
+riskRemediation with MFA strength. Coverage and exclusions are advisory for both
+risk checks; Security Defaults is not a substitute. No risky-user/sign-in event
+or registration report is needed to detect these policies.
 For SSPR, Microsoft Graph does not expose the exact Password reset > Properties
 scope. SsprAllScopeConfirmed defaults to true, recording the lab operator's
 confirmation without requiring a flag on every run. Set it explicitly to false
@@ -44,9 +48,9 @@ checked against that tenant before its configuration is read.
 
 .PARAMETER ApprovedExcludedUserId
 Explicitly approved Conditional Access user exclusions, such as the object IDs
-returned by script 04. For MFA and sign-in risk, these affect only the coverage
-advisory, not policy detection. Legacy-authentication and user-risk checks still
-require approved exclusions. Does not omit these users from the registration advisory.
+returned by script 04. For MFA and both risk checks, these affect only the coverage
+advisory, not policy detection. The legacy-authentication check still requires
+approved exclusions. Does not omit these users from the registration advisory.
 
 .PARAMETER ApprovedExcludedGroupId
 Explicitly approved Conditional Access group exclusions.
@@ -83,7 +87,7 @@ Path to a PFX outside this repository.
 .PARAMETER PassThru
 Also return the 10 structured result objects for filtering or export. Each
 result includes Evidence; Details contains the same value for compatibility.
-MFA and sign-in risk results also include PolicyConfiguration with PolicyFound,
+MFA and both risk results also include PolicyConfiguration with PolicyFound,
 EnabledPolicyFound, CoverageVerified, and matching policy details. These are also
 saved in the snapshot.
 
@@ -377,49 +381,21 @@ function Get-MfaAssessment {
 }
 
 function Get-RiskAssessment {
-    param([ValidateSet("SignIn", "User")] [string] $Risk)
+    param([Parameter(Mandatory)] [ValidateSet("SignIn", "User")] [string] $Risk)
 
+    $parameters = @{
+        Policies = @(Get-CheckData "ConditionalAccess")
+        ApprovedExclusions = $approvedExclusions
+    }
     if ($Risk -eq "SignIn") {
-        $policyAssessment = Get-SecureM365MfaPolicyAssessment -SignInRisk `
-            -Policies @(Get-CheckData "ConditionalAccess") -ApprovedExclusions $approvedExclusions
-        return New-Assessment $policyAssessment.Status $policyAssessment.Evidence `
-            -PolicyConfiguration $policyAssessment
+        $parameters.SignInRisk = $true
     }
-
-    if (Get-CheckedSecurityDefaults) {
-        return New-Assessment "NOT-CONFIGURED" "Security defaults is enabled instead of risk-based Conditional Access. This is an alternative mitigation, not an implemented risk policy."
+    else {
+        $parameters.UserRisk = $true
     }
-    $policies = @(Get-CheckData "ConditionalAccess")
-    $matching = @(
-        $policies | Where-Object {
-            $policy = $_
-            $controls = @($policy.grantControls.builtInControls)
-            $remediations = @($controls | Where-Object { $_ -in @("passwordChange", "riskRemediation") })
-            $riskMatches =
-                @($policy.conditions.userRiskLevels) -contains "high" -and
-                    $policy.grantControls.operator -eq "AND" -and
-                    $remediations.Count -eq 1 -and
-                    ($controls -notcontains "riskRemediation" -or $null -ne $policy.grantControls.authenticationStrength)
-            (Test-ReportPolicyScope -Policy $policy -Risk $Risk) -and
-                (Test-SecureM365CaTargetsAllUsers $policy) -and
-                (Test-ReportMfaGrant $policy) -and
-                (Test-SecureM365CaUsesEveryTimeSignInFrequency $policy) -and
-                $policy.sessionControls.signInFrequency.authenticationType -eq "primaryAndSecondaryAuthentication" -and
-                $riskMatches
-        }
-    )
-    if ($matching.Count -gt 0) {
-        return New-Assessment "IMPLEMENTED" "Enforced risk policy with MFA and every-time reauthentication: $($matching.displayName -join ', ')."
-    }
-    $enabledRiskPolicies = @(
-        $policies | Where-Object {
-            $_.state -eq "enabled" -and @($_.conditions.userRiskLevels | Where-Object { $_ }).Count -gt 0
-        }
-    )
-    if ($enabledRiskPolicies.Count -gt 0) {
-        return New-Assessment "UNKNOWN" "Enabled risk policies exist, but the guide's all-user/all-resource baseline, approved exclusions, risk levels, MFA/remediation, and every-time reauthentication were not all verified."
-    }
-    New-Assessment "NOT-CONFIGURED" "No enabled $Risk risk policy was found. Disabled and report-only policies do not count."
+    $policyAssessment = Get-SecureM365MfaPolicyAssessment @parameters
+    New-Assessment $policyAssessment.Status $policyAssessment.Evidence `
+        -PolicyConfiguration $policyAssessment
 }
 
 function Get-TeamsAssessment {

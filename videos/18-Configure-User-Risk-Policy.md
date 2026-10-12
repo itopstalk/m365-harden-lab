@@ -8,7 +8,7 @@ ms.date: 10/05/2026
 
 # Require remediation for high-risk users
 
-Create CA005 with high user risk, MFA authentication strength, and mandatory every-time reauthentication. This procedure uses the current documented **Require risk remediation** portal workflow accepted by script 99.
+Create CA005 with high user risk, MFA authentication strength, and mandatory every-time reauthentication. This procedure uses the current documented **Require risk remediation** portal workflow accepted by scripts 19 and 99.
 
 **Admin tool:** [Microsoft Entra admin center](https://entra.microsoft.com).
 
@@ -24,7 +24,7 @@ Create CA005 with high user risk, MFA authentication strength, and mandatory eve
 - Availability of **Require risk remediation** in the tenant's Conditional Access grant controls.
 
 > [!IMPORTANT]
-> Script 18 submits `passwordChange` with MFA authentication strength. Microsoft's current portal instructions use `riskRemediation`, which supports password-based and passwordless remediation. This guide targets the same **script 99 recommendation outcome**, not identical behavior for every authentication method. Script 99 explicitly accepts either remediation control; script 19 still specifically requires `passwordChange`.
+> Script 18 remains unchanged and submits `passwordChange` with MFA authentication strength. Microsoft's current portal instructions use `riskRemediation`, which supports password-based and passwordless remediation. This guide targets the same **recommendation outcome**, not identical behavior for every authentication method. Scripts 19 and 99 recognize either remediation control when the required MFA and reauthentication settings are present. Detection is not a live verification of a user's remediation flow.
 
 ## Create CA005
 
@@ -83,14 +83,33 @@ For staging, use **Report-only** at step 32 and later complete [procedure 20](20
 | Remediation grant | `riskRemediation`, rather than script 18's `passwordChange` |
 | Authentication strength | Multifactor authentication, ID `00000000-0000-0000-0000-000000000002` |
 | Sign-in frequency | Enabled; `frequencyInterval = everyTime` |
-| Reauthentication scope expected by script 99 | `authenticationType = primaryAndSecondaryAuthentication` |
+| Reauthentication scope required by scripts 19 and 99 | `authenticationType = primaryAndSecondaryAuthentication` |
 
-Exactly one remediation grant must be selected. Keep the authentication strength in the same policy; relying only on a different MFA policy is not the shape script 99 checks for the modern remediation control.
+Exactly one remediation grant must be selected. Keep the authentication strength in the same policy; relying only on a different MFA policy does not satisfy the checks for the modern remediation control.
 
 Do not add location exceptions, device compliance requirements, or application filters. Do not create real risky-user events just to complete this recording.
+
+## Check the policy
+
+Scripts 19 and 99 report a matching **enabled** policy as `Resolved = True` /
+`IMPLEMENTED`. Matching requires All users, high user risk, mandatory MFA AND
+exactly one remediation control, and every-time primary-and-secondary
+reauthentication. Disabled and report-only policies do not pass. Neither does
+Security Defaults or a policy that requires MFA without remediation.
+
+Coverage and exclusions are separate advisories. Pass reviewed emergency IDs
+through `-ApprovedExcludedUserId` to have the coverage advisory recognize those
+exceptions; approval is not required to detect the enabled policy. A presence
+result does not prove every user or sign-in is protected.
+
+Both scripts report the policy ID, name, state, user-risk levels, remediation
+control, session settings, and exclusions. Script 19 no longer appends Secure
+Score. Script 99 includes the same evidence in `PolicyConfiguration` and snapshots.
+Neither requires a risky-user event or completed registration reporting.
 
 ## Related content
 
 - [Require remediation for risky users](https://learn.microsoft.com/entra/identity/conditional-access/policy-risk-based-user)
 - [Conditional Access grant controls](https://learn.microsoft.com/entra/identity/conditional-access/concept-conditional-access-grant#require-risk-remediation)
 - [Configure risk-based MFA and remediation](https://learn.microsoft.com/entra/identity/authentication/tutorial-risk-based-sspr-mfa)
+- [Graph grant-control request requirements](https://learn.microsoft.com/graph/api/resources/conditionalaccessgrantcontrols)

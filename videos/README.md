@@ -11,7 +11,7 @@ The main sequence targets the **same 10 recommendation outcomes in script 99**, 
 | Area | Browser procedure and limitation |
 | --- | --- |
 | Administrator MFA, all-user MFA, legacy authentication, sign-in risk, and the three Teams settings | Reproduce the scripts' policy names, scopes, grant choices, and settings. |
-| User risk | The current documented portal workflow uses **Require risk remediation**. Script 18 writes `passwordChange`; script 99 explicitly accepts either `passwordChange` or `riskRemediation` with the required MFA and session controls. These are different remediation mechanisms, not identical policy payloads. Script 19 still checks specifically for `passwordChange`. |
+| User risk | The current documented portal workflow uses **Require risk remediation**. Script 18 writes `passwordChange`; scripts 19 and 99 recognize either `passwordChange` or `riskRemediation` with the required MFA and session controls. These are different remediation mechanisms, not identical policy payloads. |
 | Emergency accounts | The browser creates the users and permanent Global Administrator assignments. It does **not** reproduce script 04's per-user `DisablePasswordExpiration` flag or its Windows DPAPI-encrypted password artifact. Those require an approved out-of-band process. An organization-wide password-expiration change is not an equivalent substitute. Script 99 does not assess either item. |
 | Teams certificate application | The optional guide covers cloud registration, certificate upload, permissions, and roles. A browser cannot generate script 06's local, non-exportable private key. A correctly prepared local certificate is a prerequisite, not a browser step. |
 | Application cleanup | The optional cleanup guide removes the cloud identity and permissions. It cannot remove a certificate from a Windows user's certificate store. |
@@ -106,8 +106,14 @@ policy, with coverage and exclusions reported separately. They require medium an
 high sign-in risk, MFA, All users, and every-time primary-and-secondary
 reauthentication; Security Defaults does not satisfy this check. Failed policy
 reads can produce `UNKNOWN` in script 99. Unapproved exclusions still affect its
-legacy-authentication and user-risk results; do not remove safety exclusions or
-falsify SSPR confirmation to change a report result.
+legacy-authentication result; do not remove safety exclusions or falsify SSPR
+confirmation to change a report result.
+
+The user-risk results in scripts 19 and 99 use the same presence/advisory split:
+an enabled All-users policy with high user risk, MFA AND exactly one remediation
+control, and every-time primary-and-secondary reauthentication passes. Coverage
+and exclusions are reported separately. Both legacy and modern remediation
+controls are recognized, but they are not interchangeable remediation workflows.
 
 ## Coverage of the remaining scripts
 
@@ -119,7 +125,8 @@ All configuration scripts have a linked procedure above. The following scripts i
 | `01-Test-TenantConnections.ps1` | Service sign-in, delegated consent, and connection checks; retained in the reporting handoff. |
 | `11-Test-AdminMfa.ps1`, `13-Test-AllUserMfa.ps1` | Read-only enabled MFA policy detection; coverage and registration are advisory. No Secure Score lookup. |
 | `17-Test-SignInRiskPolicy.ps1` | Read-only enabled sign-in risk policy detection; coverage and exclusions are advisory. No Secure Score lookup. |
-| `15-Test-BlockLegacyAuthentication.ps1`, `19-Test-UserRiskPolicy.ps1` | Read-only policy/registration/Secure Score checks. Script 19's legacy `passwordChange` test differs from script 99's accepted modern remediation path. |
+| `19-Test-UserRiskPolicy.ps1` | Read-only enabled user-risk policy detection; coverage and exclusions are advisory. Recognizes both remediation controls. No Secure Score lookup. |
+| `15-Test-BlockLegacyAuthentication.ps1` | Read-only legacy-authentication policy and Secure Score checks. |
 | `31-Test-UserApplicationConsent.ps1` | Read-only consent and Secure Score checks. |
 | `41-Test-TeamsInvitedUsersLobbyPolicy.ps1`, `43-Test-TeamsOrganizerOnlyPresenterPolicy.ps1`, `45-Test-TeamsAnonymousMeetingJoin.ps1` | Read-only checks of the Global meeting policy and Secure Score. |
 | `61-Test-SsprAllUsers.ps1` | Read-only registration-report and Secure Score checks, not the exact portal scope. |

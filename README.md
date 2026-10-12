@@ -539,8 +539,8 @@ same object IDs used with scripts 10 and 12:
 
 Script 11's coverage advisory uses script 10's 16-role baseline. Script 99's
 administrator coverage advisory checks currently assigned role templates, which
-can include additional roles. The legacy-authentication and user-risk
-recommendations in script 99 still require verified scopes and approved exclusions.
+can include additional roles. The legacy-authentication recommendation in
+script 99 still requires verified scopes and approved exclusions.
 
 Registration counts, including emergency accounts, are advisory and can lag by
 up to 36 hours. Missing registration or an unavailable registration report does
@@ -600,6 +600,52 @@ This runtime requirement is different from detecting the configured policy.
 
 Copy scripts 17 and 99 together with the current `SecureM365.Common.psm1` to the
 separate system. An existing CA004 policy does not need to be recreated.
+
+## User-risk policy configuration checks
+
+[Script 18](scripts/18-New-UserRiskPolicy.ps1) remains unchanged: it creates an
+enabled high-user-risk policy with `passwordChange`, MFA authentication strength,
+and every-time primary-and-secondary reauthentication, excluding the supplied
+emergency accounts. This is not the modern adaptive `riskRemediation` workflow.
+
+The [Graph grant-control reference](https://learn.microsoft.com/graph/api/resources/conditionalaccessgrantcontrols)
+documents `mfa` plus `passwordChange` for legacy requests, and authentication
+strength plus `riskRemediation` for modern requests. Detecting an existing
+script-18-style policy is not a live validation of its password-reset or
+self-remediation flow; verify those tenant prerequisites separately.
+
+[Script 19](scripts/19-Test-UserRiskPolicy.ps1) and script 99's user-risk
+recommendation now share an enabled-policy assessment. A matching policy must
+target **All users**, include **high user risk**, require **MFA AND exactly one**
+remediation control (`passwordChange` or `riskRemediation`), and require
+**every-time primary-and-secondary reauthentication**. The modern control requires
+MFA authentication strength in that policy. MFA alone, optional remediation,
+both remediation controls together, and Security Defaults do not satisfy the check.
+
+`PolicyFound` identifies a matching policy even when disabled or report-only;
+only a matching **enabled** policy produces `Resolved = True` / `IMPLEMENTED`.
+Emergency exclusions and narrower scope affect the separate `CoverageVerified`
+advisory, not this presence result. The output includes the policy ID, name,
+state, user-risk levels, remediation control, reauthentication, and exclusions.
+It does not prove that every account is protected or that remediation has completed.
+
+```powershell
+$risk = .\19-Test-UserRiskPolicy.ps1 -TenantId $TenantId
+$risk.Policies | Format-List
+.\19-Test-UserRiskPolicy.ps1 -TenantId $TenantId -ApprovedExcludedUserId $EmergencyAccountIds
+
+$results = .\99-Test-M365RecommendationStatus.ps1 -TenantId $TenantId -PassThru
+$results[4].PolicyConfiguration
+```
+
+Script 19 returns one assessment without a separate Secure Score result.
+Neither check needs a risky-user event or a registration report. Both request
+`Prefer: include-unknown-enum-members` when reading policies, including subsequent
+pages, so Graph returns the newer `riskRemediation` value. Script 99 also saves
+the structured policy evidence in its JSON snapshots.
+
+Copy scripts 19 and 99 together with the current `SecureM365.Common.psm1` to the
+separate system. These changes do not recreate, migrate, or enable tenant policies.
 
 ## Teams meeting policy scope
 
