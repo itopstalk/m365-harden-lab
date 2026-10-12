@@ -70,9 +70,15 @@ If staging is necessary, choose **Report-only** at step 25 and later complete [p
 
 Do not choose **Passwordless MFA**, **Phishing-resistant MFA**, or a custom strength for this script-equivalent configuration. Do not add **Require device to be marked as compliant** as an alternative; **MFA OR compliant device** would let users bypass MFA and would not satisfy script 99.
 
-Do not automatically exclude guests, trusted locations, the current administrator, or synchronization roles. The script excludes only the emergency user IDs supplied to it. Any additional exception needs explicit review and matching approved-exclusion parameters in the report.
+Do not automatically exclude guests, trusted locations, the current administrator, or synchronization roles. The script excludes only the emergency user IDs supplied to it. Any additional exception needs explicit review and matching approved-exclusion parameters for the report's separate coverage advisory.
 
-Conditional Access MFA does not require changing the separate per-user MFA state to **Enabled** or **Enforced**. Registration data is advisory in script 99; registration alone is not policy enforcement.
+Conditional Access MFA does not require changing the separate per-user MFA state to **Enabled** or **Enforced**. Scripts 13 and 99 detect CA002's enabled all-user MFA configuration independently of user registration and Secure Score. They show the policy ID, name, state, and exclusions; disabled and report-only policies do not pass.
+
+An enabled policy does not wait for users to register before its requirements
+apply to a covered sign-in. Registration, exceptions, and complete coverage are
+separate advisories. Emergency exclusions and users without registered methods
+therefore do not negate the enabled-policy result, but the result is not proof
+that every user or sign-in is protected.
 
 ## Related content
 

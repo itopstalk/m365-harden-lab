@@ -23,6 +23,8 @@ function Get-MfaTestScriptBlock {
 
 $script:createMfaPolicy = Get-MfaTestScriptBlock "10-New-AdminMfaPolicy.ps1"
 $script:testAdminMfa = Get-MfaTestScriptBlock "11-Test-AdminMfa.ps1"
+$script:createAllUserMfaPolicy = Get-MfaTestScriptBlock "12-New-AllUserMfaPolicy.ps1"
+$script:testAllUserMfa = Get-MfaTestScriptBlock "13-Test-AllUserMfa.ps1"
 $roleNamesAssignment = $script:createMfaPolicy.Ast.EndBlock.Statements |
     Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and
         $_.Left.Extent.Text -eq '$adminRoleNames' }
@@ -92,7 +94,22 @@ function Invoke-MfaPolicyCheck {
     }
 }
 
-Describe "MFA policy detection using script 10's actual payload (offline)" {
+function Invoke-AllUserMfaPolicyCheck {
+    param([string] $Script, [switch] $ApproveExclusions)
+    if ($Script -eq "13") {
+        $parameters = @{ TenantId = $script:tenantId }
+        if ($ApproveExclusions) { $parameters.ApprovedExcludedUserId = $script:emergencyIds }
+        & $script:testAllUserMfa @parameters
+    }
+    else {
+        if ($ApproveExclusions) {
+            $script:approvedExclusions = @{ ApprovedExcludedUserIds = @($script:emergencyIds.Guid) }
+        }
+        Get-MfaAssessment
+    }
+}
+
+Describe "MFA policy detection using the creation scripts' actual payloads (offline)" {
     BeforeEach {
         $script:tenantId = [guid] "11111111-1111-4111-8111-111111111111"
         $script:emergencyIds = [guid[]] @(
@@ -126,7 +143,13 @@ Describe "MFA policy detection using script 10's actual payload (offline)" {
                 @{ roleDefinitionId = $_.id; principalId = $script:emergencyIds[0].Guid }
             })
             Users = @($script:emergencyIds | ForEach-Object {
-                @{ id = $_.Guid; accountEnabled = $true; userType = "Member" }
+                @{
+                    id = $_.Guid
+                    displayName = "Fixture emergency account"
+                    userPrincipalName = "fixture@example.invalid"
+                    accountEnabled = $true
+                    userType = "Member"
+                }
             })
             Registration = $script:registration
         }
@@ -158,6 +181,12 @@ Describe "MFA policy detection using script 10's actual payload (offline)" {
                     throw $script:readFailures.Registration
                 }
                 return $script:registration
+            }
+            if ($Uri -like "*/users?*") {
+                if ($script:readFailures.ContainsKey("Users")) {
+                    throw $script:readFailures.Users
+                }
+                return $script:data.Users
             }
             throw "Unexpected Graph URI: $Uri"
         }
@@ -393,6 +422,220 @@ Describe "MFA policy detection using script 10's actual payload (offline)" {
         Test-ReportPolicyScope $script:policy -Legacy | Should Be $true
         $script:approvedExclusions = @{}
         Test-ReportPolicyScope $script:policy -Legacy | Should Be $false
+    }
+
+    Context "All-user policy from script 12" {
+        BeforeEach {
+            & $script:createAllUserMfaPolicy -TenantId $script:tenantId `
+                -EmergencyAccessAccountId $script:emergencyIds -Confirm:$false | Out-Null
+        }
+
+        It "recognizes script 12's authentication strength and exclusions in script <Script>" -TestCases @(
+            @{ Script = "13" }
+            @{ Script = "99" }
+        ) {
+            param($Script)
+            $results = @(Invoke-AllUserMfaPolicyCheck $Script)
+            $results.Count | Should Be 1
+            $result = $results[0]
+            $configuration = if ($Script -eq "13") { $result } else { $result.PolicyConfiguration }
+            $result.Status | Should Be "IMPLEMENTED"
+            $configuration.PolicyFound | Should Be $true
+            $configuration.EnabledPolicyFound | Should Be $true
+            $configuration.Resolved | Should Be $true
+            $configuration.CoverageVerified | Should Be $false
+            $configuration.Policies.Count | Should Be 1
+            $configuration.Policies[0].DisplayName | Should Be "CA002 - Require MFA for all users"
+            $configuration.Policies[0].Id | Should Be $script:policy.id
+            $configuration.Policies[0].State | Should Be "enabled"
+            $configuration.Policies[0].TargetsAllUsers | Should Be $true
+            $configuration.Policies[0].ExcludedUserIds.Count | Should Be 2
+            $script:policy.grantControls.authenticationStrength.id |
+                Should Be "00000000-0000-0000-0000-000000000002"
+            if ($Script -eq "13") {
+                $result.UsersNotMfaCapable | Should Be 2
+                $result.UsersWithMissingRegistrationData | Should Be 0
+                $result.RegistrationDetails.Count | Should Be 2
+            }
+            else {
+                $result.Evidence | Should Match "2 of 2 checked enabled accounts are not reported MFA-capable"
+            }
+            Assert-MockCalled Test-SecureM365ScoreAction -Times 0 -Scope It
+        }
+
+        It "uses approved exclusions only for coverage in script <Script>" -TestCases @(
+            @{ Script = "13" }
+            @{ Script = "99" }
+        ) {
+            param($Script)
+            $result = Invoke-AllUserMfaPolicyCheck $Script -ApproveExclusions
+            $configuration = if ($Script -eq "13") { $result } else { $result.PolicyConfiguration }
+            $result.Status | Should Be "IMPLEMENTED"
+            $configuration.CoverageVerified | Should Be $true
+            $configuration.Policies[0].ExclusionsApproved | Should Be $true
+        }
+
+        It "does not pass a <State> all-user policy in script <Script>" -TestCases @(
+            @{ Script = "13"; State = "disabled" }
+            @{ Script = "13"; State = "enabledForReportingButNotEnforced" }
+            @{ Script = "99"; State = "disabled" }
+            @{ Script = "99"; State = "enabledForReportingButNotEnforced" }
+        ) {
+            param($Script, $State)
+            $script:policy.state = $State
+            $result = Invoke-AllUserMfaPolicyCheck $Script
+            $configuration = if ($Script -eq "13") { $result } else { $result.PolicyConfiguration }
+            $result.Status | Should Be "NOT-CONFIGURED"
+            $configuration.PolicyFound | Should Be $true
+            $configuration.EnabledPolicyFound | Should Be $false
+            $result.Evidence | Should Match $State
+        }
+
+        It "keeps a failed <Dataset> read advisory in script <Script>" -TestCases @(
+            @{ Script = "13"; Dataset = "Registration" }
+            @{ Script = "13"; Dataset = "Users" }
+            @{ Script = "99"; Dataset = "Registration" }
+            @{ Script = "99"; Dataset = "Users" }
+        ) {
+            param($Script, $Dataset)
+            $script:readFailures[$Dataset] = "Fixture $Dataset read denied."
+            $result = Invoke-AllUserMfaPolicyCheck $Script
+            $result.Status | Should Be "IMPLEMENTED"
+            if ($Script -eq "13") {
+                $result.UsersNotMfaCapable | Should Be $null
+                $result.UsersWithMissingRegistrationData | Should Be $null
+                $result.RegistrationEvidence | Should Match "Fixture $Dataset read denied"
+            }
+            else {
+                $result.Evidence | Should Match "Fixture $Dataset read denied"
+            }
+        }
+
+        It "does not pass an absent all-user policy in script <Script>" -TestCases @(
+            @{ Script = "13" }
+            @{ Script = "99" }
+        ) {
+            param($Script)
+            $script:policies = @()
+            $script:data.ConditionalAccess = @()
+            $result = Invoke-AllUserMfaPolicyCheck $Script
+            $configuration = if ($Script -eq "13") { $result } else { $result.PolicyConfiguration }
+            $result.Status | Should Be "NOT-CONFIGURED"
+            $configuration.PolicyFound | Should Be $false
+        }
+
+        It "does not pass a failed policy read in script <Script>" -TestCases @(
+            @{ Script = "13" }
+            @{ Script = "99" }
+        ) {
+            param($Script)
+            $script:readFailures.ConditionalAccess = "Fixture all-user policy query failed."
+            { Invoke-AllUserMfaPolicyCheck $Script } | Should Throw "Fixture all-user policy query failed"
+        }
+
+        It "does not mistake role-only targeting for All users in script <Script>" -TestCases @(
+            @{ Script = "13" }
+            @{ Script = "99" }
+        ) {
+            param($Script)
+            $script:policy.conditions.users.includeUsers = @()
+            $script:policy.conditions.users.includeRoles = @($script:roleDefinitions[0].templateId)
+            $result = Invoke-AllUserMfaPolicyCheck $Script
+            $result.Status | Should Be "NOT-CONFIGURED"
+        }
+
+        It "does not treat optional MFA as an all-user requirement in script <Script>" -TestCases @(
+            @{ Script = "13" }
+            @{ Script = "99" }
+        ) {
+            param($Script)
+            $script:policy.grantControls.builtInControls = @("compliantDevice")
+            $result = Invoke-AllUserMfaPolicyCheck $Script
+            $result.Status | Should Be "NOT-CONFIGURED"
+        }
+
+        It "accepts Security Defaults without claiming a CA policy exists in script <Script>" -TestCases @(
+            @{ Script = "13" }
+            @{ Script = "99" }
+        ) {
+            param($Script)
+            $script:policies = @()
+            $script:data.ConditionalAccess = @()
+            $script:data.SecurityDefaults.isEnabled = $true
+            $result = Invoke-AllUserMfaPolicyCheck $Script
+            $configuration = if ($Script -eq "13") { $result } else { $result.PolicyConfiguration }
+            $result.Status | Should Be "IMPLEMENTED"
+            $configuration.PolicyFound | Should Be $false
+            $configuration.SecurityDefaultsEnabled | Should Be $true
+        }
+
+        It "reports missing registration rows separately from known non-capable users" {
+            $script:registration = @($script:registration[0])
+            $result = Invoke-AllUserMfaPolicyCheck "13"
+            $result.Resolved | Should Be $true
+            $result.UsersNotMfaCapable | Should Be 1
+            $result.UsersWithMissingRegistrationData | Should Be 1
+            $result.RegistrationDetails.Count | Should Be 2
+        }
+
+        It "reports an empty registration report as missing data, not successful enrollment" {
+            $script:registration = @()
+            $result = Invoke-AllUserMfaPolicyCheck "13"
+            $result.Resolved | Should Be $true
+            $result.UsersNotMfaCapable | Should Be 0
+            $result.UsersWithMissingRegistrationData | Should Be 2
+        }
+
+        It "does not treat a non-Boolean capability value as verified registration" {
+            $script:registration[0].isMfaCapable = "true"
+            $result = Invoke-AllUserMfaPolicyCheck "13"
+            $result.Resolved | Should Be $true
+            $result.UsersNotMfaCapable | Should Be 1
+            $result.UsersWithMissingRegistrationData | Should Be 1
+            $result.RegistrationDetails.Count | Should Be 2
+        }
+
+        It "does not invent zero readiness failures when the user inventory is empty" {
+            $script:data.Users = @()
+            $result = Invoke-AllUserMfaPolicyCheck "13"
+            $result.Resolved | Should Be $true
+            $result.UsersNotMfaCapable | Should Be $null
+            $result.RegistrationEvidence | Should Match "No enabled member accounts"
+        }
+
+        It "excludes disabled members and guests from the member-registration advisory" {
+            $script:data.Users[0].accountEnabled = $false
+            $script:data.Users[1].userType = "Guest"
+            $script:data.Users += @{
+                id = "55555555-5555-4555-8555-555555555555"
+                accountEnabled = $true
+                userType = "Member"
+            }
+            $result = Invoke-AllUserMfaPolicyCheck "13"
+            $result.Resolved | Should Be $true
+            $result.UsersNotMfaCapable | Should Be 0
+            $result.UsersWithMissingRegistrationData | Should Be 1
+            $result.RegistrationDetails.Count | Should Be 1
+        }
+
+        It "reports malformed registration data as an advisory error" {
+            $script:registration += $script:registration[0]
+            $result = Invoke-AllUserMfaPolicyCheck "13"
+            $result.Resolved | Should Be $true
+            $result.UsersNotMfaCapable | Should Be $null
+            $result.RegistrationEvidence | Should Match "missing or duplicate user ID"
+        }
+
+        It "persists the all-user policy evidence in script 99 snapshots" {
+            $result = Invoke-AllUserMfaPolicyCheck "99"
+            $path = Save-RecommendationSnapshot -Results @($result) `
+                -TenantId $script:tenantId -CheckedAt ([datetimeoffset]::UtcNow) -Directory $TestDrive
+            $saved = @(Get-Content -LiteralPath $path -Raw | ConvertFrom-Json)
+            $saved[0].PolicyConfiguration.PolicyFound | Should Be $true
+            $saved[0].PolicyConfiguration.Policies[0].DisplayName |
+                Should Be "CA002 - Require MFA for all users"
+            $saved[0].PolicyConfiguration.Policies[0].TargetsAllUsers | Should Be $true
+        }
     }
 
     It "exports the helpers used by copied scripts and assesses through the real module" {

@@ -99,7 +99,7 @@ Use the explicit `-TenantId` even when reusing a Graph connection. If you delibe
 
 Script 99 defaults `SsprAllScopeConfirmed` to true. That is valid only after completing procedure 60. If **All** has not actually been confirmed, supply `-SsprAllScopeConfirmed:$false`; the honest result is `UNKNOWN`.
 
-Allow policy/role propagation and reconnect services as needed. Teams policy changes can take up to 24 hours. Authentication registration reporting can lag by up to 36 hours. The MFA results in scripts 11 and 99 check for a matching enabled policy or Security Defaults; coverage, exclusions, and registration are separate advisories, not proof every sign-in is protected. Failed policy reads can produce `UNKNOWN` in script 99. Unapproved exclusions still affect its non-MFA Conditional Access recommendations; do not remove safety exclusions or falsify SSPR confirmation to change a report result.
+Allow policy/role propagation and reconnect services as needed. Teams policy changes can take up to 24 hours. Authentication registration reporting can lag by up to 36 hours. The MFA results in scripts 11, 13, and 99 check for a matching enabled policy or Security Defaults; coverage, exclusions, and registration are separate advisories, not proof every sign-in is protected. Failed policy reads can produce `UNKNOWN` in script 99. Unapproved exclusions still affect its non-MFA Conditional Access recommendations; do not remove safety exclusions or falsify SSPR confirmation to change a report result.
 
 ## Coverage of the remaining scripts
 
@@ -109,8 +109,8 @@ All configuration scripts have a linked procedure above. The following scripts i
 | --- | --- |
 | `00-Install-PowerShellTools.ps1` | Local reporting-tool installation, not a tenant security setting. |
 | `01-Test-TenantConnections.ps1` | Service sign-in, delegated consent, and connection checks; retained in the reporting handoff. |
-| `11-Test-AdminMfa.ps1` | Read-only enabled MFA policy detection; coverage and registration are advisory. No Secure Score lookup. |
-| `13-Test-AllUserMfa.ps1`, `15-Test-BlockLegacyAuthentication.ps1`, `17-Test-SignInRiskPolicy.ps1`, `19-Test-UserRiskPolicy.ps1` | Read-only policy/registration/Secure Score checks. Script 19's legacy `passwordChange` test differs from script 99's accepted modern remediation path. |
+| `11-Test-AdminMfa.ps1`, `13-Test-AllUserMfa.ps1` | Read-only enabled MFA policy detection; coverage and registration are advisory. No Secure Score lookup. |
+| `15-Test-BlockLegacyAuthentication.ps1`, `17-Test-SignInRiskPolicy.ps1`, `19-Test-UserRiskPolicy.ps1` | Read-only policy/registration/Secure Score checks. Script 19's legacy `passwordChange` test differs from script 99's accepted modern remediation path. |
 | `31-Test-UserApplicationConsent.ps1` | Read-only consent and Secure Score checks. |
 | `41-Test-TeamsInvitedUsersLobbyPolicy.ps1`, `43-Test-TeamsOrganizerOnlyPresenterPolicy.ps1`, `45-Test-TeamsAnonymousMeetingJoin.ps1` | Read-only checks of the Global meeting policy and Secure Score. |
 | `61-Test-SsprAllUsers.ps1` | Read-only registration-report and Secure Score checks, not the exact portal scope. |

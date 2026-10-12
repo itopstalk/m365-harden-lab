@@ -20,6 +20,8 @@ directory roles or all users; all-user MFA requires a policy targeting All users
 Security Defaults also satisfies these configuration checks. Policy names, IDs,
 states, exclusions, and a separate coverage advisory are included in the evidence.
 An IMPLEMENTED MFA result does not prove every account or sign-in is protected.
+These checks share the policy evaluator used by scripts 11 and 13, including
+script 12's built-in MFA authentication strength.
 For SSPR, Microsoft Graph does not expose the exact Password reset > Properties
 scope. SsprAllScopeConfirmed defaults to true, recording the lab operator's
 confirmation without requiring a flag on every run. Set it explicitly to false
