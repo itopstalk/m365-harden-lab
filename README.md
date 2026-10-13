@@ -8,6 +8,51 @@ settings, execution order, and the handoff to script 99. It also documents
 browser-only limitations and separates optional automation setup and cleanup
 from the main hardening sequence.
 
+## Standalone setup and assessment
+
+`scripts\AA-AssessM365Status.ps1` combines scripts 00, 01, and 99, with the
+required `SecureM365.Common.psm1` helpers embedded. Copy this one file to another
+directory or machine; no other repository files are needed. The original scripts
+remain available separately.
+
+For assessment-only Graph consent, run from the `scripts` directory:
+
+```powershell
+.\AA-AssessM365Status.ps1 -UseGraphBrowserPkce -ConsentForAllScripts:$false
+```
+
+The script installs missing modules from PSGallery for the current user, prompts
+for the tenant GUID if `-TenantId` is omitted, validates Graph and Teams access,
+and runs the same ten checks as script 99. Teams validation is automatic and may
+require its own sign-in; certificate authentication parameters are also supported.
+A Teams access failure produces `UNKNOWN` for the Teams rows without suppressing
+the remaining results. Tenant configuration is not changed.
+
+PowerShell 7.2 or later is required for assessment. If launched in Windows
+PowerShell or an older version, the script uses WinGet to install PowerShell 7
+and stops; open `pwsh.exe` and rerun the same file. `-WhatIf` previews installation
+without authenticating, reading tenant data, or writing a snapshot.
+
+As in script 01, `ConsentForAllScripts` defaults to **true**, including the
+high-privilege write scopes needed by the rest of the lab. Use the explicit false
+value above when those scopes are not needed. As in script 99,
+`SsprAllScopeConfirmed` defaults to **true**; use `-SsprAllScopeConfirmed:$false`
+unless Password reset > Properties = All has been independently verified.
+
+Snapshots default to `C:\SecureM365Snapshots`; use `-SnapshotDirectory` to change
+the destination. `-PassThru` returns only the ten assessment objects, not module
+inventories or connection summaries:
+
+```powershell
+$results = .\AA-AssessM365Status.ps1 -TenantId $TenantId `
+    -UseGraphBrowserPkce -ConsentForAllScripts:$false `
+    -SsprAllScopeConfirmed:$false -PassThru
+$results | Where-Object Status -ne "IMPLEMENTED"
+```
+
+The same approved-exclusion parameters, evidence fields, coverage advisories,
+and recognition limitations described in [tests.md](tests.md) apply.
+
 ## Connect from the GitHub Copilot App
 
 Run these commands from the `scripts` directory. If `-TenantId` is omitted,
