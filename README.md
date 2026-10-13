@@ -53,6 +53,72 @@ $results | Where-Object Status -ne "IMPLEMENTED"
 The same approved-exclusion parameters, evidence fields, coverage advisories,
 and recognition limitations described in [tests.md](tests.md) apply.
 
+## Standalone security configuration
+
+`scripts\ZZ-ConfigureM365Status.ps1` combines scripts 04, 06, 10, 12, 14, 16,
+18, 20, 30, 40, 42, and 44, with its required common-module helpers embedded.
+It needs no other repository files. The original scripts remain unchanged.
+Use Windows and PowerShell 7.2 or later with these installed modules:
+
+```powershell
+Install-Module -Name Microsoft.Graph.Authentication,Microsoft.Graph.Identity.SignIns,`
+    Microsoft.Graph.Identity.Governance,MicrosoftTeams -Scope CurrentUser -Repository PSGallery
+```
+
+Preview with authenticated read-only discovery, then run the configuration:
+
+```powershell
+.\ZZ-ConfigureM365Status.ps1 -TenantId $TenantId -UseGraphBrowserPkce -WhatIf
+.\ZZ-ConfigureM365Status.ps1 -TenantId $TenantId -UseGraphBrowserPkce
+```
+
+The script creates or verifies two cloud-only emergency Global Administrators
+and the certificate-based Teams automation application. It stages missing
+CA001-CA005 policies, disables ordinary-user application consent while preserving
+other grant assignments, and applies all three Global Teams meeting settings.
+It then requires explicit emergency-access and MFA-readiness confirmation before
+enabling report-only policies. `-Confirm:$false` does **not** bypass that separate
+readiness confirmation, which defaults to **No**. Enrollment, tested emergency
+sign-in, SSPR/password writeback, monitoring, appropriate licenses, and active administrative permissions
+remain operator responsibilities. **Security Defaults must already be disabled**;
+the script does not change it.
+
+To split provisioning from enforcement without requiring another script:
+
+```powershell
+.\ZZ-ConfigureM365Status.ps1 -TenantId $TenantId -ReportOnly
+# After reviewing impact and testing the already-created emergency accounts:
+$result = .\ZZ-ConfigureM365Status.ps1 -TenantId $TenantId `
+    -EmergencyAccessReady -Confirm:$false -PassThru
+```
+
+`-ReportOnly` does not disable already-enabled policies. `-EmergencyAccessReady`
+is an explicit readiness attestation and is rejected if any requested emergency
+account still needs creation. Only verified matching users, application/certificate
+setup, and policies are reused. Duplicates, disabled policies, partial identities,
+or configuration differences stop the run; existing passwords are never reset,
+certificates are not rotated, and unrelated policies are not changed. Temporary
+CA003 legacy-authentication exceptions must be supplied explicitly; emergency
+accounts are automatically excluded only from CA001, CA002, CA004, and CA005.
+
+New emergency passwords are saved and recovery-verified before creating users,
+in `Documents\SecureM365\EmergencyAccessPasswords-<tenant>.json` by default.
+The DPAPI artifact is decryptable only by the same Windows user on the same
+computer. Keep a protected backup; use `-PasswordFilePath` for another destination
+and approve `-OverwritePasswordFile` only after preserving any existing artifact.
+Reused accounts produce no new password file. The Teams certificate has a
+non-exportable RSA-3072 private key in `Cert:\CurrentUser\My`; reruns that reuse
+the application require that certificate and private-key access.
+
+**CA005 retains script 18's compatibility caveat:** its original `passwordChange`
+plus MFA authentication-strength grant is preserved, not silently replaced with
+another remediation model. Microsoft Graph currently documents `mfa` +
+`passwordChange` or authentication strength + `riskRemediation` instead. A service
+rejection stops the run. Successful readback does not prove live user remediation.
+Failures report confirmed partial changes without rolling them back; review those
+changes before retrying. `-PassThru` returns the final configuration report or
+preview plan without passwords or private keys.
+
 ## Connect from the GitHub Copilot App
 
 Run these commands from the `scripts` directory. If `-TenantId` is omitted,
