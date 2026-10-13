@@ -26,6 +26,8 @@ Creates missing CA001-CA005 policies initially in report-only mode. Unless
 after explicit emergency-access and MFA-readiness confirmation. Existing matching
 enabled policies are left enabled. Existing report-only policies can be promoted;
 disabled, ambiguous, or differently configured policies require manual review.
+Graph OData response annotations are ignored when comparing policy settings.
+Genuine mismatches include the expected and actual normalized JSON for review.
 Unrelated policies and custom Teams meeting policies are never changed.
 
 Removes ordinary-user application-consent assignments, preserving other grant
@@ -917,7 +919,8 @@ function ConvertTo-SecureM365ComparableJson {
         }
         $properties = @(
             foreach ($name in ($names | Sort-Object)) {
-                if ($name -like "@odata.*") { continue }
+                # Graph annotates properties too, for example authenticationStrength@odata.context.
+                if ($name -like "*@odata.*") { continue }
                 $child = $Value.$name
                 # Graph can expand strength metadata; the built-in ID defines the grant.
                 if ($name -eq "authenticationStrength" -and $null -ne $child) {
@@ -956,9 +959,10 @@ function Assert-SecureM365PolicyMatch {
         throw "Policy '$($Policy.displayName)' is '$($Policy.state)', not enabled or report-only. Review it manually before rerunning."
     }
     foreach ($field in @("conditions", "grantControls", "sessionControls")) {
-        if ((ConvertTo-SecureM365ComparableJson $Policy.$field) -cne
-            (ConvertTo-SecureM365ComparableJson $Body[$field])) {
-            throw "Policy '$($Policy.displayName)' ($($Policy.id)) differs in $field. Existing policies are not rewritten; review the difference before rerunning."
+        $expected = ConvertTo-SecureM365ComparableJson $Body[$field]
+        $actual = ConvertTo-SecureM365ComparableJson $Policy.$field
+        if ($actual -cne $expected) {
+            throw "Policy '$($Policy.displayName)' ($($Policy.id)) differs in $field. Expected (normalized): $expected. Actual (normalized): $actual. Existing policies are not rewritten; review the difference before rerunning."
         }
     }
 }

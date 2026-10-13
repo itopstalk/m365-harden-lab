@@ -101,6 +101,11 @@ certificates are not rotated, and unrelated policies are not changed. Temporary
 CA003 legacy-authentication exceptions must be supplied explicitly; emergency
 accounts are automatically excluded only from CA001, CA002, CA004, and CA005.
 
+Policy comparisons ignore Graph OData response annotations, including
+`authenticationStrength@odata.context`; these are metadata, not grant requirements.
+Genuine setting differences still stop the run and show the expected and actual
+normalized JSON without rewriting the existing policy.
+
 New emergency passwords are saved and recovery-verified before creating users,
 in `Documents\SecureM365\EmergencyAccessPasswords-<tenant>.json` by default.
 The DPAPI artifact is decryptable only by the same Windows user on the same
