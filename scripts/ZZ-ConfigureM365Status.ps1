@@ -101,6 +101,8 @@ Use the embedded browser-PKCE flow for managed terminals.
 
 .PARAMETER PropagationRetryCount
 Maximum readback/connection attempts. Defaults to 6.
+Policy-not-found HTTP 404 responses are retried to allow newly created policies
+to propagate. Exhaustion stops the run without recreating the policy.
 
 .PARAMETER PropagationRetryDelaySeconds
 Seconds between propagation attempts. Defaults to 10.
@@ -991,9 +993,17 @@ function Get-ReviewedConditionalAccessPolicy {
             }
         }
         catch {
-            $notFound =
-                [string] $_.Exception.ResponseStatusCode -in @("NotFound", "404") -or
-                $_.Exception.Message -match '(?i)\b404\b|ResourceNotFound|does not exist in the directory'
+            # REST requests expose Response.StatusCode; generated Graph cmdlets use ResponseStatusCode.
+            $statusCode = $_.Exception.Response.StatusCode
+            if ($null -eq $statusCode) { $statusCode = $_.Exception.ResponseStatusCode }
+            if ($null -eq $statusCode) { $statusCode = $_.Exception.StatusCode }
+            $notFound = if ($null -ne $statusCode) {
+                [string] $statusCode -in @("NotFound", "404")
+            }
+            else {
+                $details = "$($_.Exception.Message) $($_.ErrorDetails.Message)"
+                $details -match '(?i)\b404\b|\bNot\s*Found\b|ResourceNotFound|does not exist in the directory'
+            }
             if (-not $notFound -or $attempt -eq $PropagationRetryCount) { throw }
         }
         Wait-SecureM365Propagation -Operation "Policy '$($PolicyId.Guid)' readback" -Attempt $attempt

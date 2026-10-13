@@ -119,6 +119,15 @@ Failures report confirmed partial changes without rolling them back; review thos
 changes before retrying. `-PassThru` returns the final configuration report or
 preview plan without passwords or private keys.
 
+New Conditional Access policies can briefly return HTTP 404/`ResourceNotFound`
+when read immediately after creation. The script retries those reads, not the
+creation request, using `-PropagationRetryCount` (default 6) and
+`-PropagationRetryDelaySeconds` (default 10). If visibility still cannot be
+confirmed, let the policy propagate and rerun the updated script as the same
+Windows user on the same computer. Verified matching objects are reused; do not
+delete the emergency accounts, application, certificate, or password artifact
+to recover from a read-back delay.
+
 ## Connect from the GitHub Copilot App
 
 Run these commands from the `scripts` directory. If `-TenantId` is omitted,
