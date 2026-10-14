@@ -33,6 +33,11 @@ not that every account or sign-in is protected. MFA and risk-policy coverage and
 registration readiness are separate advisories. Report-only and disabled policies
 do not count as enabled protection. Teams checks assess only the Global policy.
 
+After displaying the final assessment heading, results table, summary, and
+snapshot path, saves the same text as UTF-8 to hardening-results.txt in the current
+working directory. Replaces the previous file, including a report from script ZZ.
+Module inventories, connection messages, and warning-stream output are not included.
+
 SSPR All-scope confirmation defaults to true, preserving script 99's lab behavior.
 Microsoft Graph does not expose the exact Password reset > Properties scope.
 Use -SsprAllScopeConfirmed:$false unless All has been independently verified.
@@ -99,7 +104,8 @@ not mixed into these results.
 
 .NOTES
 -WhatIf previews tool installation only: no authentication, tenant reads, or
-snapshot writes occur. Declined or failed required installations stop assessment.
+text report or snapshot writes occur. Declined or failed required installations
+stop assessment.
 The embedded authentication, policy evaluation, and report logic are derived
 from scripts 00, 01, 99, and SecureM365.Common.psm1 in this repository.
 
@@ -1461,7 +1467,7 @@ foreach ($moduleName in $requiredModules) {
 }
 
 if ($WhatIfPreference) {
-    Write-Host "WhatIf: no tenant connections, assessment, or snapshot writes were performed."
+    Write-Host "WhatIf: no tenant connections, assessment, or text report or snapshot writes were performed."
     return
 }
 
@@ -1647,10 +1653,13 @@ $checks = @(
 )
 
 $checkedAt = [datetimeoffset]::UtcNow
-Write-Host "`nMicrosoft 365 live recommendation status"
-Write-Host "Tenant: $($assessmentTenantId.Guid) | Checked at: $($checkedAt.ToString('u'))"
-Write-Host "MFA results check enabled configuration; complete coverage and registration are advisory."
-Write-Host "Registration data can lag by up to 36 hours. UNKNOWN means not verified, not necessarily unconfigured.`n"
+$reportHeader = @(
+    "`nMicrosoft 365 live recommendation status"
+    "Tenant: $($assessmentTenantId.Guid) | Checked at: $($checkedAt.ToString('u'))"
+    "MFA results check enabled configuration; complete coverage and registration are advisory."
+    "Registration data can lag by up to 36 hours. UNKNOWN means not verified, not necessarily unconfigured.`n"
+) -join [Environment]::NewLine
+Write-Host $reportHeader
 $results = @(
     for ($index = 0; $index -lt $checks.Count; $index++) {
         $check = $checks[$index]
@@ -1681,13 +1690,20 @@ $snapshotPath = Save-RecommendationSnapshot `
     -CheckedAt $checkedAt `
     -Directory $SnapshotDirectory
 
-$results |
-    Format-Table Number, Status, Recommendation, Evidence -Wrap |
-    Out-Host
-
 $implemented = @($results | Where-Object Status -eq "IMPLEMENTED").Count
 $notConfigured = @($results | Where-Object Status -eq "NOT-CONFIGURED").Count
 $unknown = @($results | Where-Object Status -eq "UNKNOWN").Count
-Write-Host "`nSummary: $implemented implemented, $notConfigured not configured, $unknown unknown ($($checks.Count) recommendations)."
-Write-Host "Snapshot: $snapshotPath"
+$reportText = @(
+    $results | Format-Table Number, Status, Recommendation, Evidence -Wrap | Out-String -Stream
+    "`nSummary: $implemented implemented, $notConfigured not configured, $unknown unknown ($($checks.Count) recommendations)."
+    "Snapshot: $snapshotPath"
+) -join [Environment]::NewLine
+Write-Host $reportText
+
+$reportPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath("hardening-results.txt")
+if (Test-Path -LiteralPath $reportPath -PathType Container) {
+    throw "Final results path '$reportPath' is a directory."
+}
+@($reportHeader, $reportText) -join [Environment]::NewLine |
+    Set-Content -LiteralPath $reportPath -Encoding utf8 -ErrorAction Stop
 if ($PassThru) { $results }

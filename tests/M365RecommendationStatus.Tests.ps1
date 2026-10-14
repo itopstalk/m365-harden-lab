@@ -290,3 +290,172 @@ Describe "Script 99 snapshot persistence" {
         $errorMessage | Should Match "already exists and will not be overwritten"
     }
 }
+
+$assessmentAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $scriptsRoot "AA-AssessM365Status.ps1"), [ref] $null, [ref] $parseErrors
+)
+if ($parseErrors.Count -gt 0) { throw ($parseErrors.Message -join "; ") }
+$assessmentReportStart = @($assessmentAst.EndBlock.Statements | Where-Object {
+    $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $_.Left.Extent.Text -eq '$checkedAt'
+})
+if ($assessmentReportStart.Count -ne 1) { throw "Expected one assessment report block." }
+$assessmentReportStatements = @($assessmentAst.EndBlock.Statements | Where-Object {
+    $_.Extent.StartOffset -ge $assessmentReportStart[0].Extent.StartOffset
+})
+$assessmentReportHelpers = @($assessmentAst.EndBlock.Statements | Where-Object {
+    $_ -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $_.Name -in @("New-Assessment", "Save-RecommendationSnapshot")
+})
+$assessmentPreviewGuard = @($assessmentAst.EndBlock.Statements | Where-Object {
+    $_ -is [System.Management.Automation.Language.IfStatementAst] -and
+        $_.Clauses[0].Item1.Extent.Text -eq '$WhatIfPreference'
+})
+if ($assessmentPreviewGuard.Count -ne 1) { throw "Expected one assessment preview guard." }
+$assessmentReportScript = [scriptblock]::Create(
+    '[CmdletBinding(SupportsShouldProcess)] param([switch] $PassThru)' +
+    [Environment]::NewLine + ($assessmentReportHelpers.Extent.Text -join [Environment]::NewLine) +
+    [Environment]::NewLine + $assessmentPreviewGuard[0].Extent.Text +
+    [Environment]::NewLine + ($assessmentReportStatements.Extent.Text -join [Environment]::NewLine)
+)
+
+Describe "Standalone assessment text results" {
+    BeforeEach {
+        $workingDirectory = Join-Path $TestDrive ("assessment [local] " + [guid]::NewGuid().Guid)
+        $null = New-Item -Path $workingDirectory -ItemType Directory -ErrorAction Stop
+        $script:SnapshotDirectory = Join-Path $workingDirectory "snapshots"
+        $script:expectedReportPath = Join-Path $workingDirectory "hardening-results.txt"
+        $script:assessmentTenantId = [guid] "11111111-1111-4111-8111-111111111111"
+        $script:checks = @(
+            foreach ($number in 1..10) {
+                $assessment = [pscustomobject]@{
+                    Status = if ($number -le 4) { "IMPLEMENTED" }
+                        elseif ($number -le 7) { "NOT-CONFIGURED" }
+                        else { "UNKNOWN" }
+                    Evidence = "Fixture evidence $number"
+                    PolicyConfiguration = $null
+                }
+                @{
+                    Title = "Fixture recommendation $number"
+                    Evaluate = { $assessment }.GetNewClosure()
+                }
+            }
+        )
+        $script:checks[0].Title = "Caf$([char] 0x00E9) recommendation"
+        $script:displayedAssessment = [Collections.Generic.List[string]]::new()
+        $script:existingReportsAtDisplay = [Collections.Generic.List[object]]::new()
+        Push-Location -LiteralPath $workingDirectory
+        Mock Write-Host {
+            $script:displayedAssessment.Add([string] $Object)
+            $existingReport = $null
+            if (Test-Path -LiteralPath $script:expectedReportPath -PathType Leaf) {
+                $existingReport = Get-Content -LiteralPath $script:expectedReportPath -Raw
+            }
+            $script:existingReportsAtDisplay.Add($existingReport)
+        }
+        Mock Write-Warning {}
+    }
+
+    AfterEach {
+        Pop-Location
+    }
+
+    It "displays the full final assessment before saving UTF-8 text and preserves its JSON snapshot" {
+        $output = @(& $assessmentReportScript)
+
+        $output.Count | Should Be 0
+        $script:displayedAssessment.Count | Should Be 2
+        @($script:existingReportsAtDisplay | Where-Object { $null -ne $_ }).Count | Should Be 0
+        $bytes = [IO.File]::ReadAllBytes($script:expectedReportPath)
+        $saved = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+        $saved | Should Be (($script:displayedAssessment -join [Environment]::NewLine) + [Environment]::NewLine)
+        $saved | Should Match "Microsoft 365 live recommendation status"
+        $saved | Should Match $script:assessmentTenantId.Guid
+        $saved | Should Match "Checked at:"
+        $saved | Should Match "complete coverage and registration are advisory"
+        $saved | Should Match "Number\s+Status\s+Recommendation\s+Evidence"
+        $saved | Should Match $script:checks[0].Title
+        $saved | Should Match "Fixture evidence 10"
+        $saved | Should Match "Summary: 4 implemented, 3 not configured, 3 unknown \(10 recommendations\)"
+
+        $snapshots = @(Get-ChildItem -LiteralPath $script:SnapshotDirectory -Filter "*.json")
+        $snapshots.Count | Should Be 1
+        $saved | Should Match ([regex]::Escape("Snapshot: $($snapshots[0].FullName)"))
+        $jsonResults = @(Get-Content -LiteralPath $snapshots[0].FullName -Raw | ConvertFrom-Json)
+        $jsonResults.Count | Should Be 10
+        $jsonResults[0].Recommendation | Should Be $script:checks[0].Title
+        $jsonResults[9].Evidence | Should Be "Fixture evidence 10"
+    }
+
+    It "replaces a previous report only after displaying the new assessment" {
+        [IO.File]::WriteAllText($script:expectedReportPath, "Previous ZZ report")
+
+        & $assessmentReportScript
+
+        $script:existingReportsAtDisplay.Count | Should Be 2
+        $script:existingReportsAtDisplay[0] | Should Be "Previous ZZ report"
+        $script:existingReportsAtDisplay[1] | Should Be "Previous ZZ report"
+        $saved = Get-Content -LiteralPath $script:expectedReportPath -Raw
+        $saved | Should Be (($script:displayedAssessment -join [Environment]::NewLine) + [Environment]::NewLine)
+        $saved | Should Not Match "Previous ZZ report"
+    }
+
+    It "returns only the ten structured assessment results with PassThru" {
+        $output = @(& $assessmentReportScript -PassThru)
+
+        $output.Count | Should Be 10
+        $output[0].Number | Should Be 1
+        $output[9].Number | Should Be 10
+        $output[0].Status | Should Be "IMPLEMENTED"
+        $output[0].Recommendation | Should Be $script:checks[0].Title
+        $output[0].Evidence | Should Be "Fixture evidence 1"
+        $output[0].Details | Should Be $output[0].Evidence
+        Test-Path -LiteralPath $script:expectedReportPath -PathType Leaf | Should Be $true
+    }
+
+    It "retains UNKNOWN results and failure evidence without copying warning-stream output" {
+        $script:checks[4].Evaluate = { throw "Fixture check failed." }
+
+        $output = @(& $assessmentReportScript -PassThru)
+
+        $output[4].Status | Should Be "UNKNOWN"
+        $output[4].Evidence | Should Be "CHECK FAILED: Fixture check failed."
+        $saved = Get-Content -LiteralPath $script:expectedReportPath -Raw
+        $saved | Should Match "CHECK FAILED:"
+        $saved | Should Match "Summary: 4 implemented, 2 not configured, 4 unknown"
+        $saved | Should Not Match "WARNING:|Check 5 failed:"
+        Assert-MockCalled Write-Warning -Times 1 -Exactly -Scope It
+    }
+
+    It "rejects a directory at the report path after displaying the assessment" {
+        $null = New-Item -Path $script:expectedReportPath -ItemType Directory -ErrorAction Stop
+
+        { & $assessmentReportScript } | Should Throw "is a directory"
+
+        $script:displayedAssessment.Count | Should Be 2
+    }
+
+    It "propagates a text report write failure without losing the JSON snapshot" {
+        Mock Set-Content { throw "Fixture report write denied." } -ParameterFilter {
+            $LiteralPath -eq $script:expectedReportPath
+        }
+
+        { & $assessmentReportScript } | Should Throw "Fixture report write denied"
+
+        $script:displayedAssessment.Count | Should Be 2
+        @(Get-ChildItem -LiteralPath $script:SnapshotDirectory -Filter "*.json").Count | Should Be 1
+    }
+
+    It "does not write a text report or snapshot under WhatIf" {
+        $assessmentPreviewGuard[0].Extent.StartOffset |
+            Should BeLessThan $assessmentReportStart[0].Extent.StartOffset
+
+        $output = @(& $assessmentReportScript -WhatIf -PassThru)
+
+        $output.Count | Should Be 0
+        $script:displayedAssessment.Count | Should Be 1
+        $script:displayedAssessment[0] | Should Match "^WhatIf:"
+        Test-Path -LiteralPath $script:expectedReportPath | Should Be $false
+        Test-Path -LiteralPath $script:SnapshotDirectory | Should Be $false
+    }
+}

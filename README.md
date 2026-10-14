@@ -31,7 +31,7 @@ the remaining results. Tenant configuration is not changed.
 PowerShell 7.2 or later is required for assessment. If launched in Windows
 PowerShell or an older version, the script uses WinGet to install PowerShell 7
 and stops; open `pwsh.exe` and rerun the same file. `-WhatIf` previews installation
-without authenticating, reading tenant data, or writing a snapshot.
+without authenticating, reading tenant data, or writing a text report or snapshot.
 
 As in script 01, `ConsentForAllScripts` defaults to **true**, including the
 high-privilege write scopes needed by the rest of the lab. Use the explicit false
@@ -40,8 +40,14 @@ value above when those scopes are not needed. As in script 99,
 unless Password reset > Properties = All has been independently verified.
 
 Snapshots default to `C:\SecureM365Snapshots`; use `-SnapshotDirectory` to change
-the destination. `-PassThru` returns only the ten assessment objects, not module
-inventories or connection summaries:
+the destination. After displaying the final assessment, the script also saves
+its heading, results table, summary, and snapshot path as UTF-8 text to
+`hardening-results.txt` in the current working directory. The previous file is
+replaced, including any report written by ZZ in the same directory. Setup
+messages and warning-stream output are not included.
+
+`-PassThru` returns only the ten assessment objects, not module inventories or
+connection summaries:
 
 ```powershell
 $results = .\AA-AssessM365Status.ps1 -TenantId $TenantId `
