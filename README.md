@@ -15,7 +15,8 @@ required `SecureM365.Common.psm1` helpers embedded. Copy this one file to anothe
 directory or machine; no other repository files are needed. The original scripts
 remain available separately.
 
-For assessment-only Graph consent, run from the `scripts` directory:
+For assessment Graph consent plus automatic Teams certificate discovery, run from
+the `scripts` directory:
 
 ```powershell
 .\AA-AssessM365Status.ps1 -UseGraphBrowserPkce -ConsentForAllScripts:$false
@@ -23,10 +24,41 @@ For assessment-only Graph consent, run from the `scripts` directory:
 
 The script installs missing modules from PSGallery for the current user, prompts
 for the tenant GUID if `-TenantId` is omitted, validates Graph and Teams access,
-and runs the same ten checks as script 99. Teams validation is automatic and may
-require its own sign-in; certificate authentication parameters are also supported.
-A Teams access failure produces `UNKNOWN` for the Teams rows without suppressing
-the remaining results. Tenant configuration is not changed.
+and runs the same ten checks as script 99. By default, AA independently creates or
+reuses its own **SecureM365 Teams Assessment** application and local certificate;
+it does not require ZZ or any ZZ-created identity.
+
+**First-time Teams setup requires approval and an authorized administrator.** It
+creates a single-tenant application, service principal, and a non-exportable
+RSA-3072 certificate in `Cert:\CurrentUser\My`, valid for 12 months. The application
+receives only Microsoft Graph `Organization.Read.All` and the tenant-wide
+**Teams Communications Administrator** role. That role permits meeting-policy
+changes, but AA only reads those policies. AA does not assign roles to the
+signed-in operator or change the hardening controls it assesses.
+
+The setup administrator must be permitted to create applications, grant Microsoft
+Graph application consent, and assign directory roles. Privileged Role Administrator
+is the least-privileged built-in role for the latter two operations; activate PIM
+roles before setup where applicable. With
+`-ConsentForAllScripts:$false`, discovery adds `Application.Read.All` and
+`Organization.Read.All`; only after setup approval does AA request
+`Application.ReadWrite.All`, `AppRoleAssignment.ReadWrite.All`, and
+`RoleManagement.ReadWrite.Directory`.
+
+Later runs reuse verified matching objects without new grants or setup write
+scopes. Keep using the same Windows account and computer: the private key is not
+exportable. The default certificate subject includes the tenant GUID. Missing keys,
+expired certificates, duplicate objects, differing grants, and partial setup require
+manual review; AA never silently rotates keys, repairs identities, or rolls back
+partial changes. Use `-TeamsApplicationDisplayName` and `-TeamsCertificateSubject`
+to choose a separate identity when deliberately configuring another Windows profile.
+
+Use `-UseTeamsUserAuthentication` for normal user-based Teams sign-in, or
+`-UseTeamsDeviceAuthentication` for device-code sign-in, instead of automatic setup.
+Existing `-TeamsApplicationId` plus certificate thumbprint/PFX parameters also bypass
+automatic provisioning. Automatic setup requires Windows. Setup or access failures
+produce `UNKNOWN` for the three Teams rows without suppressing the other assessments;
+the script does not silently fall back to user authentication or broader grants.
 
 PowerShell 7.2 or later is required for assessment. If launched in Windows
 PowerShell or an older version, the script uses WinGet to install PowerShell 7

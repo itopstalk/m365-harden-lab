@@ -9,7 +9,24 @@ Standalone combination of scripts 00, 01, and 99. All required helpers from
 SecureM365.Common.psm1 are embedded; no other repository file is required.
 Installs missing PowerShell modules for the current user from PSGallery, validates
 Microsoft Graph and Teams access to the intended tenant, and reports the same ten
-recommendations as script 99. Tenant configuration is read-only.
+recommendations as script 99. Assessment reads are read-only; the automatic Teams
+authentication setup described below creates an application and permission grants.
+
+By default, independently provisions or reuses the "SecureM365 Teams Assessment"
+application and a tenant-specific certificate in Cert:\CurrentUser\My. No ZZ script
+or ZZ-created identity is required. First-time setup requires confirmation before
+creating a non-exportable, 12-month RSA-3072 certificate, a single-tenant application,
+and its service principal. Grants that principal only Microsoft Graph
+Organization.Read.All and the tenant-wide Teams Communications Administrator role.
+That role can change meeting policies, but this script only reads those policies.
+The signed-in operator needs permission to create applications, grant Microsoft
+Graph application consent, and assign directory roles; activate PIM roles if needed.
+
+Existing matching identities are reused without new grants. Missing local keys,
+expired certificates, duplicate identities, partial setup, or differing permissions
+require manual review; credentials are never silently replaced or rotated. Keep
+using the same Windows account and computer. Use separate application names and
+certificate subjects when deliberately setting up another Windows profile.
 
 The assessment requires PowerShell 7.2 or later. When started in Windows
 PowerShell or an older PowerShell version, installs PowerShell 7 using WinGet,
@@ -22,7 +39,11 @@ Teams are imported for this assessment; no Exchange connection is needed.
 
 As in script 01, the default Graph consent profile includes the write permissions
 used by the other lab scripts. Use -ConsentForAllScripts:$false for read-only
-assessment consent. Graph consent does not grant Entra roles or Teams permissions.
+assessment consent. Automatic certificate discovery adds Application.Read.All and
+Organization.Read.All. Approved first-time setup additionally requests
+Application.ReadWrite.All, AppRoleAssignment.ReadWrite.All, and
+RoleManagement.ReadWrite.Directory. Later matching runs do not need setup write
+scopes. Graph consent does not grant Entra roles or Teams permissions to the user.
 Teams meeting-policy access is always validated; no -IncludeTeams switch is needed.
 Teams failures are recorded as UNKNOWN for the three Teams recommendations rather
 than preventing the remaining checks or snapshot.
@@ -51,7 +72,9 @@ only after validating the tenant, delegated user, and required scopes.
 .PARAMETER ConsentForAllScripts
 Defaults to true, requesting the complete delegated Graph scope set used by
 scripts 00-99, including write permissions. Set to false for assessment-only
-read scopes. This does not modify tenant settings or assign administrator roles.
+read scopes and automatic certificate discovery. Approved first-time Teams setup
+still requests its separate setup write scopes and grants the application's Teams
+role. The operator's roles are never changed.
 
 .PARAMETER UseGraphDeviceCode
 Use device-code authentication for Graph. Cannot be combined with browser PKCE.
@@ -61,12 +84,26 @@ Use system-browser authorization-code authentication with PKCE and a temporary
 localhost callback. Intended for managed terminals where WAM or device prompts
 are not visible. Passwords and tokens are never saved.
 
+.PARAMETER UseTeamsUserAuthentication
+Use normal interactive Teams user authentication instead of automatic certificate
+setup. The Teams user needs an active role that permits reading meeting policies.
+Cannot be combined with an explicit application ID or certificate parameters.
+
 .PARAMETER UseTeamsDeviceAuthentication
-Use device authentication for Teams instead of the normal interactive connection.
-Cannot be combined with certificate-based Teams authentication.
+Use delegated Teams device-code authentication instead of automatic certificate
+setup. Cannot be combined with certificate-based Teams authentication.
+
+.PARAMETER TeamsApplicationDisplayName
+Automatic setup's dedicated application name. Defaults to SecureM365 Teams Assessment.
+Used only when no explicit certificate or user-authentication option is selected.
+
+.PARAMETER TeamsCertificateSubject
+Automatic setup's certificate subject. Defaults to
+CN=SecureM365 Teams Assessment <tenant GUID>. Used only for automatic setup.
 
 .PARAMETER TeamsApplicationId
-Use a dedicated Teams application with exactly one certificate parameter.
+Use an explicitly supplied Teams application with exactly one certificate parameter,
+instead of automatic setup. This application is not created or modified.
 
 .PARAMETER TeamsCertificateThumbprint
 Thumbprint in Cert:\CurrentUser\My for the Teams application certificate.
@@ -106,6 +143,10 @@ not mixed into these results.
 -WhatIf previews tool installation only: no authentication, tenant reads, or
 text report or snapshot writes occur. Declined or failed required installations
 stop assessment.
+Automatic Teams certificate setup requires Windows. Setup and connection failures
+leave Teams checks UNKNOWN; other assessments continue. Confirmed partial setup
+changes are reported and are not rolled back. No fallback to user authentication
+or broader application permissions is attempted.
 The embedded authentication, policy evaluation, and report logic are derived
 from scripts 00, 01, 99, and SecureM365.Common.psm1 in this repository.
 
@@ -120,6 +161,9 @@ $results = .\AA-AssessM365Status.ps1 -TenantId $TenantId -PassThru
 
 .EXAMPLE
 .\AA-AssessM365Status.ps1 -WhatIf
+
+.EXAMPLE
+.\AA-AssessM365Status.ps1 -UseTeamsUserAuthentication -ConsentForAllScripts:$false
 
 .LINK
 https://learn.microsoft.com/powershell/module/microsoft.graph.authentication/connect-mggraph
@@ -136,7 +180,12 @@ param(
     [Alias("UseDeviceCode")]
     [switch] $UseGraphDeviceCode,
     [switch] $UseGraphBrowserPkce,
+    [switch] $UseTeamsUserAuthentication,
     [switch] $UseTeamsDeviceAuthentication,
+    [ValidateNotNullOrEmpty()]
+    [string] $TeamsApplicationDisplayName = "SecureM365 Teams Assessment",
+    [ValidatePattern('^CN=[^,=]+$')]
+    [string] $TeamsCertificateSubject,
     [guid] $TeamsApplicationId,
     [string] $TeamsCertificateThumbprint,
     [string] $TeamsCertificatePath,
@@ -750,6 +799,380 @@ function Get-SecureM365TeamsMeetingPolicy {
     }
     $policies[0]
 }
+
+#region Automatic Teams certificate setup, using ZZ's matching and provisioning safeguards
+function ConvertTo-SecureM365ObjectId {
+    param([AllowNull()][AllowEmptyString()][string] $Value, [string] $Label)
+    $id = [guid]::Empty
+    if (-not [guid]::TryParse($Value, [ref] $id) -or $id -eq [guid]::Empty) {
+        throw "$Label did not contain a non-empty object GUID."
+    }
+    $id.Guid
+}
+
+function Test-SecureM365Property {
+    param($Object, [string] $Name)
+    if ($null -eq $Object) { return $false }
+    if ($Object -is [Collections.IDictionary]) { return $Object.Contains($Name) }
+    $null -ne $Object.PSObject.Properties[$Name]
+}
+
+function Assert-SecureM365TeamsCertificate {
+    param([Parameter(Mandatory)][Security.Cryptography.X509Certificates.X509Certificate2] $Certificate)
+
+    if (
+        -not $Certificate.HasPrivateKey -or $Certificate.NotBefore -gt (Get-Date) -or
+        $Certificate.NotAfter -le (Get-Date) -or
+        $Certificate.SignatureAlgorithm.Value -ne "1.2.840.113549.1.1.11"
+    ) {
+        throw "The Teams certificate must be currently valid, SHA256/RSA-signed, and have an accessible private key."
+    }
+    $rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
+    try {
+        if ($null -eq $rsa -or $rsa.KeySize -ne 3072) {
+            throw "The Teams certificate must have a 3072-bit RSA key."
+        }
+        $nonExportable = if ($rsa -is [Security.Cryptography.RSACng]) {
+            $rsa.Key.ExportPolicy -eq [Security.Cryptography.CngExportPolicies]::None
+        }
+        elseif ($rsa -is [Security.Cryptography.RSACryptoServiceProvider]) {
+            -not $rsa.CspKeyContainerInfo.Exportable
+        }
+        else {
+            $false
+        }
+        if (-not $nonExportable) {
+            throw "The Teams certificate's private key could not be verified as non-exportable."
+        }
+    }
+    finally {
+        if ($null -ne $rsa) { $rsa.Dispose() }
+    }
+}
+
+function Get-SecureM365TeamsApplicationPlan {
+    param(
+        [Parameter(Mandatory)][string] $DisplayName,
+        [Parameter(Mandatory)][string] $CertificateSubject,
+        [Parameter(Mandatory)][string] $GraphServicePrincipalId,
+        [Parameter(Mandatory)][string] $OrganizationReadRoleId,
+        [Parameter(Mandatory)][string] $TeamsRoleDefinitionId
+    )
+
+    $escapedName = [uri]::EscapeDataString($DisplayName.Replace("'", "''"))
+    $applications = @(Get-SecureM365GraphCollection `
+        -Uri "https://graph.microsoft.com/v1.0/applications?`$filter=displayName%20eq%20'$escapedName'&`$select=id,appId,displayName")
+    $certificates = @(Get-ChildItem -Path Cert:\CurrentUser\My -ErrorAction Stop |
+        Where-Object Subject -eq $CertificateSubject)
+    if ($applications.Count -gt 1 -or $certificates.Count -gt 1) {
+        throw "The Teams application name or certificate subject is ambiguous. Resolve duplicates manually."
+    }
+    $result = [pscustomobject]@{
+        Action = "Create"
+        ApplicationDisplayName = $DisplayName
+        ApplicationId = $null
+        ApplicationObjectId = $null
+        ServicePrincipalObjectId = $null
+        CertificateSubject = $CertificateSubject
+        CertificateThumbprint = $null
+        CertificateNotAfter = $null
+        GraphServicePrincipalId = $GraphServicePrincipalId
+        OrganizationReadRoleId = $OrganizationReadRoleId
+        TeamsRoleDefinitionId = $TeamsRoleDefinitionId
+        AppRoleAssignmentId = $null
+        DirectoryRoleAssignmentId = $null
+    }
+    if ($applications.Count -eq 0 -and $certificates.Count -eq 0) { return $result }
+    if ($applications.Count -ne 1 -or $certificates.Count -ne 1) {
+        throw "Only part of the Teams application/certificate setup exists. Use the original Windows user and computer, or review the application and Cert:\CurrentUser\My. Partial identities are not silently repaired or replaced."
+    }
+
+    $applicationObjectId = ConvertTo-SecureM365ObjectId $applications[0].id "Teams application object"
+    $application = Invoke-MgGraphRequest -Method GET `
+        -Uri "https://graph.microsoft.com/v1.0/applications/${applicationObjectId}?`$select=id,appId,displayName,signInAudience,keyCredentials,passwordCredentials,requiredResourceAccess" -ErrorAction Stop
+    $applicationId = ConvertTo-SecureM365ObjectId $application.appId "Teams application client ID"
+    if (
+        $application.id -ne $applicationObjectId -or $application.displayName -ne $DisplayName -or
+        $application.signInAudience -ne "AzureADMyOrg" -or
+        -not (Test-SecureM365Property $application "passwordCredentials") -or
+        @($application.passwordCredentials | Where-Object { $null -ne $_ }).Count -ne 0
+    ) {
+        throw "The existing Teams application is not the expected single-tenant, certificate-only application."
+    }
+    $resources = @($application.requiredResourceAccess)
+    $permissions = @($resources.resourceAccess)
+    if (
+        $resources.Count -ne 1 -or $resources[0].resourceAppId -ne "00000003-0000-0000-c000-000000000000" -or
+        $permissions.Count -ne 1 -or $permissions[0].id -ne $OrganizationReadRoleId -or
+        $permissions[0].type -ne "Role"
+    ) {
+        throw "The existing Teams application's requested permissions differ from Organization.Read.All only."
+    }
+    $certificate = $certificates[0]
+    Assert-SecureM365TeamsCertificate -Certificate $certificate
+    $keys = @($application.keyCredentials)
+    if (
+        $keys.Count -ne 1 -or $keys[0].type -ne "AsymmetricX509Cert" -or
+        $keys[0].usage -ne "Verify" -or
+        [string] $keys[0].key -cne [Convert]::ToBase64String($certificate.RawData) -or
+        [string]::IsNullOrWhiteSpace([string] $keys[0].startDateTime) -or
+        [string]::IsNullOrWhiteSpace([string] $keys[0].endDateTime) -or
+        [datetimeoffset] $keys[0].startDateTime -gt [datetimeoffset]::UtcNow -or
+        [datetimeoffset] $keys[0].endDateTime -le [datetimeoffset]::UtcNow
+    ) {
+        throw "The Teams application's public certificate does not uniquely match the valid local certificate. No key will be rotated."
+    }
+    $servicePrincipals = @(Get-SecureM365GraphCollection `
+        -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId%20eq%20'$applicationId'&`$select=id,appId,accountEnabled,passwordCredentials")
+    if ($servicePrincipals.Count -ne 1 -or $servicePrincipals[0].appId -ne $applicationId -or
+        $servicePrincipals[0].accountEnabled -isnot [bool] -or -not $servicePrincipals[0].accountEnabled -or
+        -not (Test-SecureM365Property $servicePrincipals[0] "passwordCredentials") -or
+        @($servicePrincipals[0].passwordCredentials | Where-Object { $null -ne $_ }).Count -ne 0) {
+        throw "The Teams application must have exactly one enabled, matching service principal without client secrets."
+    }
+    $principalId = ConvertTo-SecureM365ObjectId $servicePrincipals[0].id "Teams service principal"
+    $appGrants = @(Get-SecureM365GraphCollection `
+        -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$principalId/appRoleAssignments")
+    if (
+        $appGrants.Count -ne 1 -or $appGrants[0].principalId -ne $principalId -or
+        $appGrants[0].resourceId -ne $GraphServicePrincipalId -or
+        $appGrants[0].appRoleId -ne $OrganizationReadRoleId -or
+        [string]::IsNullOrWhiteSpace([string] $appGrants[0].id)
+    ) {
+        throw "The Teams service principal's application grants do not match Organization.Read.All only."
+    }
+    $filter = [uri]::EscapeDataString("principalId eq '$principalId'")
+    $directoryGrants = @(Get-SecureM365GraphCollection `
+        -Uri "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?`$filter=$filter&`$select=id,principalId,roleDefinitionId,directoryScopeId")
+    if (
+        $directoryGrants.Count -ne 1 -or $directoryGrants[0].principalId -ne $principalId -or
+        $directoryGrants[0].roleDefinitionId -ne $TeamsRoleDefinitionId -or
+        $directoryGrants[0].directoryScopeId -ne "/" -or
+        [string]::IsNullOrWhiteSpace([string] $directoryGrants[0].id)
+    ) {
+        throw "The Teams service principal's directory roles do not match tenant-wide Teams Communications Administrator only."
+    }
+    $result.Action = "Reuse"
+    $result.ApplicationId = $applicationId
+    $result.ApplicationObjectId = $applicationObjectId
+    $result.ServicePrincipalObjectId = $principalId
+    $result.CertificateThumbprint = $certificate.Thumbprint
+    $result.CertificateNotAfter = $certificate.NotAfter
+    $result.AppRoleAssignmentId = [string] $appGrants[0].id
+    $result.DirectoryRoleAssignmentId = [string] $directoryGrants[0].id
+    $result
+}
+
+function New-SecureM365TeamsApplication {
+    param(
+        [Parameter(Mandatory)] $Plan,
+        [Parameter(Mandatory)][hashtable] $RunState
+    )
+
+    if ($Plan.Action -eq "Reuse") { return $Plan }
+    $current = Get-SecureM365TeamsApplicationPlan -DisplayName $Plan.ApplicationDisplayName `
+        -CertificateSubject $Plan.CertificateSubject -GraphServicePrincipalId $Plan.GraphServicePrincipalId `
+        -OrganizationReadRoleId $Plan.OrganizationReadRoleId -TeamsRoleDefinitionId $Plan.TeamsRoleDefinitionId
+    if ($current.Action -ne "Create") {
+        throw "The Teams application or certificate appeared after preflight. Review the identity before retrying."
+    }
+    $certificate = $null
+    try {
+        $RunState.CurrentOperation = "Create non-exportable Teams certificate '$($Plan.CertificateSubject)'"
+        $certificate = New-SelfSignedCertificate -Subject $Plan.CertificateSubject `
+            -CertStoreLocation "Cert:\CurrentUser\My" -KeyAlgorithm RSA -KeyLength 3072 `
+            -HashAlgorithm SHA256 -KeyExportPolicy NonExportable -KeySpec Signature `
+            -NotAfter (Get-Date).AddMonths(12) -ErrorAction Stop
+        $Plan.CertificateThumbprint = $certificate.Thumbprint
+        $Plan.CertificateNotAfter = $certificate.NotAfter
+        [void] $RunState.Changes.Add([pscustomobject]@{
+            Resource = "Certificate"; Action = "Created"; Id = $certificate.Thumbprint; Name = $Plan.CertificateSubject
+        })
+        Assert-SecureM365TeamsCertificate -Certificate $certificate
+        if ($certificate.Subject -ne $Plan.CertificateSubject) {
+            throw "The generated certificate subject does not match the requested Teams identity."
+        }
+        $body = @{
+            displayName = $Plan.ApplicationDisplayName
+            signInAudience = "AzureADMyOrg"
+            keyCredentials = @(@{
+                type = "AsymmetricX509Cert"
+                usage = "Verify"
+                keyId = [guid]::NewGuid().Guid
+                displayName = $Plan.CertificateSubject
+                startDateTime = $certificate.NotBefore.ToUniversalTime().ToString("o")
+                endDateTime = $certificate.NotAfter.ToUniversalTime().ToString("o")
+                key = [Convert]::ToBase64String($certificate.RawData)
+            })
+            requiredResourceAccess = @(@{
+                resourceAppId = "00000003-0000-0000-c000-000000000000"
+                resourceAccess = @(@{ id = $Plan.OrganizationReadRoleId; type = "Role" })
+            })
+        }
+        $RunState.CurrentOperation = "Create Teams application '$($Plan.ApplicationDisplayName)'"
+        $application = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/applications" `
+            -Body ($body | ConvertTo-Json -Depth 8) -ContentType "application/json" -ErrorAction Stop
+        $Plan.ApplicationObjectId = ConvertTo-SecureM365ObjectId $application.id "New Teams application object"
+        [void] $RunState.Changes.Add([pscustomobject]@{
+            Resource = "Application"; Action = "Created"; Id = $Plan.ApplicationObjectId; Name = $Plan.ApplicationDisplayName
+        })
+        $Plan.ApplicationId = ConvertTo-SecureM365ObjectId $application.appId "New Teams application client ID"
+
+        $RunState.CurrentOperation = "Create Teams service principal for '$($Plan.ApplicationId)'"
+        $principal = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/servicePrincipals" `
+            -Body (@{ appId = $Plan.ApplicationId } | ConvertTo-Json) -ContentType "application/json" -ErrorAction Stop
+        $Plan.ServicePrincipalObjectId = ConvertTo-SecureM365ObjectId $principal.id "New Teams service principal"
+        [void] $RunState.Changes.Add([pscustomobject]@{
+            Resource = "Service principal"; Action = "Created"; Id = $Plan.ServicePrincipalObjectId; Name = $Plan.ApplicationId
+        })
+        if ($principal.appId -ne $Plan.ApplicationId) {
+            throw "Graph returned a service principal for a different application. No permissions were assigned to it."
+        }
+        $RunState.CurrentOperation = "Grant Organization.Read.All to Teams service principal '$($Plan.ServicePrincipalObjectId)'"
+        $appGrant = Invoke-MgGraphRequest -Method POST `
+            -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$($Plan.ServicePrincipalObjectId)/appRoleAssignments" `
+            -Body (@{
+                principalId = $Plan.ServicePrincipalObjectId
+                resourceId = $Plan.GraphServicePrincipalId
+                appRoleId = $Plan.OrganizationReadRoleId
+            } | ConvertTo-Json) -ContentType "application/json" -ErrorAction Stop
+        if (
+            [string]::IsNullOrWhiteSpace([string] $appGrant.id) -or
+            $appGrant.principalId -ne $Plan.ServicePrincipalObjectId -or
+            $appGrant.resourceId -ne $Plan.GraphServicePrincipalId -or
+            $appGrant.appRoleId -ne $Plan.OrganizationReadRoleId
+        ) {
+            throw "The Teams Organization.Read.All application grant was not confirmed."
+        }
+        $Plan.AppRoleAssignmentId = [string] $appGrant.id
+        [void] $RunState.Changes.Add([pscustomobject]@{
+            Resource = "Application permission"; Action = "Granted"; Id = $appGrant.id; Name = "Organization.Read.All"
+        })
+        $RunState.CurrentOperation = "Assign Teams Communications Administrator to '$($Plan.ServicePrincipalObjectId)'"
+        $roleGrant = Invoke-MgGraphRequest -Method POST `
+            -Uri "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments" `
+            -Body (@{
+                principalId = $Plan.ServicePrincipalObjectId
+                roleDefinitionId = $Plan.TeamsRoleDefinitionId
+                directoryScopeId = "/"
+            } | ConvertTo-Json) -ContentType "application/json" -ErrorAction Stop
+        if (
+            [string]::IsNullOrWhiteSpace([string] $roleGrant.id) -or
+            $roleGrant.principalId -ne $Plan.ServicePrincipalObjectId -or
+            $roleGrant.roleDefinitionId -ne $Plan.TeamsRoleDefinitionId -or
+            $roleGrant.directoryScopeId -ne "/"
+        ) {
+            throw "The Teams Communications Administrator assignment was not confirmed."
+        }
+        $Plan.DirectoryRoleAssignmentId = [string] $roleGrant.id
+        $Plan.Action = "Created"
+        [void] $RunState.Changes.Add([pscustomobject]@{
+            Resource = "Directory role assignment"; Action = "Created"; Id = $roleGrant.id; Name = "Teams Communications Administrator"
+        })
+        $Plan
+    }
+    finally {
+        if ($null -ne $certificate) { $certificate.Dispose() }
+    }
+}
+
+function Connect-SecureM365AssessmentTeams {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = "High")]
+    param(
+        [Parameter(Mandatory)][guid] $TenantId,
+        [Parameter(Mandatory)][hashtable] $GraphParameters,
+        [string] $ApplicationDisplayName = "SecureM365 Teams Assessment",
+        [string] $CertificateSubject
+    )
+
+    if (-not $IsWindows) {
+        throw "Automatic Teams certificate setup requires Windows. Use UseTeamsUserAuthentication, UseTeamsDeviceAuthentication, or an explicit application/certificate instead."
+    }
+    if ([string]::IsNullOrWhiteSpace($CertificateSubject)) {
+        $CertificateSubject = "CN=SecureM365 Teams Assessment $($TenantId.Guid)"
+    }
+    $runState = @{
+        CurrentOperation = "Discover the Teams assessment identity"
+        Changes = [Collections.Generic.List[object]]::new()
+    }
+    try {
+        $graphPrincipals = @(Get-SecureM365GraphCollection `
+            -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId%20eq%20'00000003-0000-0000-c000-000000000000'&`$select=id,appId,appRoles")
+        if ($graphPrincipals.Count -ne 1 -or $graphPrincipals[0].appId -ne "00000003-0000-0000-c000-000000000000") {
+            throw "Could not uniquely resolve the Microsoft Graph service principal."
+        }
+        $organizationRoles = @($graphPrincipals[0].appRoles | Where-Object {
+            $_.value -eq "Organization.Read.All" -and $_.allowedMemberTypes -contains "Application" -and $_.isEnabled -eq $true
+        })
+        if ($organizationRoles.Count -ne 1) { throw "Could not uniquely resolve the Organization.Read.All application role." }
+        $roles = @(Get-SecureM365GraphCollection `
+            -Uri "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$filter=templateId%20eq%20'baf37b3a-610e-45da-9e62-d9d1e5e8914b'&`$select=id,templateId,displayName,isBuiltIn")
+        if ($roles.Count -ne 1 -or $roles[0].isBuiltIn -ne $true -or
+            $roles[0].templateId -ne "baf37b3a-610e-45da-9e62-d9d1e5e8914b" -or
+            $roles[0].displayName -ne "Teams Communications Administrator") {
+            throw "Could not uniquely resolve the built-in Teams Communications Administrator role."
+        }
+        $plan = Get-SecureM365TeamsApplicationPlan -DisplayName $ApplicationDisplayName `
+            -CertificateSubject $CertificateSubject `
+            -GraphServicePrincipalId (ConvertTo-SecureM365ObjectId $graphPrincipals[0].id "Microsoft Graph service principal") `
+            -OrganizationReadRoleId (ConvertTo-SecureM365ObjectId $organizationRoles[0].id "Organization.Read.All application role") `
+            -TeamsRoleDefinitionId (ConvertTo-SecureM365ObjectId $roles[0].id "Teams Communications Administrator role")
+        if ($plan.Action -eq "Create") {
+            if (-not (Get-Command New-SelfSignedCertificate -ErrorAction SilentlyContinue)) {
+                throw "New-SelfSignedCertificate is unavailable. Run automatic setup on Windows with the PKI PowerShell module."
+            }
+            Write-Host "Teams assessment setup: application '$ApplicationDisplayName'; certificate '$CertificateSubject'."
+            if (-not $PSCmdlet.ShouldProcess(
+                $TenantId.Guid,
+                "Create the Teams assessment application, service principal, and non-exportable certificate; grant Organization.Read.All and Teams Communications Administrator (includes meeting-policy write access)"
+            )) {
+                throw "Teams certificate setup was not approved. No setup changes were made. Rerun and approve setup, or choose explicit certificate or user authentication."
+            }
+            $runState.CurrentOperation = "Obtain Graph permissions for approved Teams certificate setup"
+            $writeParameters = $GraphParameters.Clone()
+            $writeParameters.AdditionalScopes = @($GraphParameters.AdditionalScopes) + @(
+                "Application.ReadWrite.All"
+                "AppRoleAssignment.ReadWrite.All"
+                "RoleManagement.ReadWrite.Directory"
+            )
+            Connect-SecureM365Graph @writeParameters | Out-Null
+            $plan = New-SecureM365TeamsApplication -Plan $plan -RunState $runState
+        }
+
+        Write-Host "Teams assessment application ID: $($plan.ApplicationId); certificate: $($plan.CertificateThumbprint)."
+        $runState.CurrentOperation = "Verify certificate-authenticated Global Teams meeting-policy access"
+        foreach ($attempt in 1..6) {
+            try {
+                return Connect-SecureM365Teams -TenantId $TenantId -ApplicationId $plan.ApplicationId `
+                    -CertificateThumbprint $plan.CertificateThumbprint -ValidateMeetingPolicyAccess
+            }
+            catch {
+                Disconnect-MicrosoftTeams -ErrorAction SilentlyContinue | Out-Null
+                if ($attempt -eq 6) {
+                    throw [InvalidOperationException]::new(
+                        "Teams certificate access could not be verified after 6 attempts. ApplicationId=$($plan.ApplicationId); CertificateThumbprint=$($plan.CertificateThumbprint). Review application consent, the Teams role, and propagation. $($_.Exception.Message)",
+                        $_.Exception
+                    )
+                }
+                Write-Warning "Teams certificate access is not verified yet; waiting 10 seconds for propagation (attempt $attempt of 6)."
+                Start-Sleep -Seconds 10
+            }
+        }
+    }
+    catch {
+        if ($runState.Changes.Count -gt 0) {
+            $confirmed = @($runState.Changes | ForEach-Object {
+                "$($_.Resource): $($_.Action); name='$($_.Name)'; ID='$($_.Id)'"
+            }) -join "; "
+            throw [InvalidOperationException]::new(
+                "Teams assessment setup stopped during: $($runState.CurrentOperation). Confirmed changes: $confirmed. No changes were rolled back. Review partial setup and writes with unknown outcomes before retrying. $($_.Exception.Message)",
+                $_.Exception
+            )
+        }
+        throw
+    }
+}
+#endregion
 
 function Get-SecureM365GraphCollection {
     [CmdletBinding()]
@@ -1427,6 +1850,15 @@ if ($UseGraphDeviceCode -and $UseGraphBrowserPkce) {
     throw "UseGraphDeviceCode and UseGraphBrowserPkce cannot be combined."
 }
 
+$explicitTeamsCertificate =
+    ($null -ne $TeamsApplicationId -and $TeamsApplicationId -ne [guid]::Empty) -or
+    -not [string]::IsNullOrWhiteSpace($TeamsCertificateThumbprint) -or
+    -not [string]::IsNullOrWhiteSpace($TeamsCertificatePath) -or
+    $null -ne $TeamsCertificatePassword
+$useAutomaticTeamsCertificate = -not (
+    $UseTeamsUserAuthentication -or $UseTeamsDeviceAuthentication -or $explicitTeamsCertificate
+)
+
 if (
     $PSVersionTable.PSEdition -ne "Core" -or
     $PSVersionTable.PSVersion -lt [version] "7.2"
@@ -1497,12 +1929,17 @@ $additionalScopes = if ($ConsentForAllScripts) {
 else {
     @()
 }
+if ($useAutomaticTeamsCertificate) {
+    $additionalScopes += @("Application.Read.All", "Organization.Read.All")
+}
 
-$context = Connect-SecureM365Graph `
-    -TenantId $assessmentTenantId `
-    -AdditionalScopes $additionalScopes `
-    -UseDeviceCode:$UseGraphDeviceCode `
-    -UseBrowserPkce:$UseGraphBrowserPkce
+$graphParameters = @{
+    TenantId = $assessmentTenantId
+    AdditionalScopes = $additionalScopes
+    UseDeviceCode = $UseGraphDeviceCode
+    UseBrowserPkce = $UseGraphBrowserPkce
+}
+$context = Connect-SecureM365Graph @graphParameters
 if ($context.Environment -ne "Global") {
     throw "This script supports the Microsoft 365 worldwide cloud only."
 }
@@ -1549,12 +1986,21 @@ $readers = [ordered]@{
             -Uri 'https://graph.microsoft.com/v1.0/policies/authorizationPolicy' -ErrorAction Stop
     }
     Teams = {
-        $teamsConnection = Connect-SecureM365Teams -TenantId $assessmentTenantId -ValidateMeetingPolicyAccess `
-            -UseDeviceAuthentication:$UseTeamsDeviceAuthentication `
-            -ApplicationId $TeamsApplicationId `
-            -CertificateThumbprint $TeamsCertificateThumbprint `
-            -CertificatePath $TeamsCertificatePath `
-            -CertificatePassword $TeamsCertificatePassword
+        $teamsConnection = if ($useAutomaticTeamsCertificate) {
+            Connect-SecureM365AssessmentTeams -TenantId $assessmentTenantId -GraphParameters $graphParameters `
+                -ApplicationDisplayName $TeamsApplicationDisplayName -CertificateSubject $TeamsCertificateSubject
+        }
+        else {
+            if ($UseTeamsUserAuthentication -and $explicitTeamsCertificate) {
+                throw "UseTeamsUserAuthentication cannot be combined with explicit Teams application or certificate parameters."
+            }
+            Connect-SecureM365Teams -TenantId $assessmentTenantId -ValidateMeetingPolicyAccess `
+                -UseDeviceAuthentication:$UseTeamsDeviceAuthentication `
+                -ApplicationId $TeamsApplicationId `
+                -CertificateThumbprint $TeamsCertificateThumbprint `
+                -CertificatePath $TeamsCertificatePath `
+                -CertificatePassword $TeamsCertificatePassword
+        }
         $teamsConnection |
             Select-Object Account, Environment, Tenant, TenantId |
             Out-Host
