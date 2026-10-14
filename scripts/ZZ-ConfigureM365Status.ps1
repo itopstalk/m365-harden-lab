@@ -48,6 +48,10 @@ at the operator's request: no grant is silently substituted or migrated. A Graph
 rejection stops configuration and is reported, not treated as a successful control.
 Successful configuration readback is not a test of the live user-remediation flow.
 
+After displaying the final configuration results, saves the same text as UTF-8
+to hardening-results.txt in the current working directory, replacing the previous
+file. The configuration plan and warnings are not included. -WhatIf writes no report.
+
 .PARAMETER TenantId
 Worldwide-cloud Microsoft Entra tenant GUID. Prompts when omitted.
 
@@ -1993,10 +1997,26 @@ try {
         SecurityDefaultsChanged = $false
         Changes = $runState.Changes.ToArray()
     }
-    $result.ConditionalAccessPolicies | Format-Table DisplayName, State -Wrap | Out-Host
-    Write-Host "Configuration completed: $($result.Status). Tenant: $($targetTenantId.Guid)."
-    Write-Host "Teams application ID: $($application.ApplicationId); certificate: $($application.CertificateThumbprint)."
-    Write-Host "Consent and all three Global Teams settings were read back. SSPR scope, enrollment, and monitoring are not configured by this script."
+    $reportText = @(
+        $result.ConditionalAccessPolicies | Format-Table DisplayName, State -Wrap | Out-String -Stream
+        "Configuration completed: $($result.Status). Tenant: $($targetTenantId.Guid)."
+        "Teams application ID: $($application.ApplicationId); certificate: $($application.CertificateThumbprint)."
+        "Consent and all three Global Teams settings were read back. SSPR scope, enrollment, and monitoring are not configured by this script."
+    ) -join [Environment]::NewLine
+    Write-Host $reportText
+
+    $reportPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath("hardening-results.txt")
+    $runState.CurrentOperation = "Save final configuration results to '$reportPath'"
+    if (Test-Path -LiteralPath $reportPath -PathType Container) {
+        throw "Final results path '$reportPath' is a directory."
+    }
+    if (
+        -not [string]::IsNullOrWhiteSpace($PasswordFilePath) -and
+        $reportPath -eq $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PasswordFilePath)
+    ) {
+        throw "Cannot save final results to '$reportPath' because it is also PasswordFilePath. The password artifact was not overwritten."
+    }
+    $reportText | Set-Content -LiteralPath $reportPath -Encoding utf8 -ErrorAction Stop
     if ($PassThru) { $result }
 }
 catch {

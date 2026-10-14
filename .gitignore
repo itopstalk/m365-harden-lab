@@ -9,3 +9,6 @@ credentials.txt
 *.p12
 *.pem
 *.key
+
+# Local tenant-hardening results.
+hardening-results.txt

@@ -124,6 +124,11 @@ Failures report confirmed partial changes without rolling them back; review thos
 changes before retrying. `-PassThru` returns the final configuration report or
 preview plan without passwords or private keys.
 
+After a completed run, the displayed final results are saved as UTF-8 text to
+`hardening-results.txt` in the current working directory, replacing the previous
+file. The configuration plan and warnings are not included; `-WhatIf` does not
+write this file.
+
 New Conditional Access policies can briefly return HTTP 404/`ResourceNotFound`
 when read immediately after creation. The script retries those reads, not the
 creation request, using `-PropagationRetryCount` (default 6) and
