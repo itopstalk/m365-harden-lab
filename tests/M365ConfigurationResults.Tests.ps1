@@ -34,6 +34,179 @@ $previewReportScript = [scriptblock]::Create(
     [Environment]::NewLine + $reportScript.ToString()
 )
 
+$moduleSetupStart = @($ast.EndBlock.Statements | Where-Object {
+    $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $_.Left.Extent.Text -eq '$configurationModules'
+})
+$moduleSetupEnd = @($ast.EndBlock.Statements | Where-Object {
+    $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $_.Left.Extent.Text -eq '$additionalScopes'
+})
+if ($moduleSetupStart.Count -ne 1 -or $moduleSetupEnd.Count -ne 1) {
+    throw "Expected one prerequisite-module setup block."
+}
+$moduleSetupStatements = @($ast.EndBlock.Statements | Where-Object {
+    $_.Extent.StartOffset -ge $moduleSetupStart[0].Extent.StartOffset -and
+        $_.Extent.StartOffset -lt $moduleSetupEnd[0].Extent.StartOffset
+})
+$moduleSetupScript = [scriptblock]::Create(
+    '[CmdletBinding(SupportsShouldProcess, ConfirmImpact = "High")] param([string] $TenantId)' +
+    [Environment]::NewLine + ($moduleSetupStatements.Extent.Text -join [Environment]::NewLine) +
+    [Environment]::NewLine + '"Prerequisites ready"'
+)
+$tenantResolver = @($ast.EndBlock.Statements | Where-Object {
+    $_ -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $_.Name -eq "Resolve-SecureM365TenantId"
+})
+if ($tenantResolver.Count -ne 1) { throw "Expected one tenant-ID resolver." }
+. ([scriptblock]::Create($tenantResolver[0].Extent.Text))
+
+$aaAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $scriptsRoot "AA-AssessM365Status.ps1"), [ref] $null, [ref] $parseErrors
+)
+if ($parseErrors.Count -gt 0) { throw ($parseErrors.Message -join "; ") }
+$aaModuleAssignment = @($aaAst.EndBlock.Statements | Where-Object {
+    $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $_.Left.Extent.Text -eq '$requiredModules'
+})
+if ($aaModuleAssignment.Count -ne 1) { throw "Expected one AA prerequisite-module list." }
+$script:prerequisiteModuleNames = @(
+    & ([scriptblock]::Create($aaModuleAssignment[0].Right.Extent.Text))
+)
+
+function Get-Module {
+    [CmdletBinding()]
+    param([string[]] $Name, [switch] $ListAvailable)
+    throw "Get-Module must be mocked in these tests."
+}
+
+function Install-Module {
+    [CmdletBinding()]
+    param([string[]] $Name, [string] $Scope, [string[]] $Repository)
+    throw "Install-Module must be mocked in these tests."
+}
+
+Describe "Standalone configuration prerequisite modules" {
+    BeforeEach {
+        $script:availableModules = @{}
+        $script:installationAttempts = [Collections.Generic.List[string]]::new()
+        $script:importedModules = [Collections.Generic.List[string]]::new()
+        $script:installationFailure = $null
+        $script:hideInstalledModules = $false
+        $script:tenantResolutionCount = 0
+        Mock Get-Module {
+            if ($script:availableModules.ContainsKey([string] $Name)) {
+                [pscustomobject]@{ Name = [string] $Name }
+            }
+        } -ParameterFilter {
+            $ListAvailable -and ([string] $Name) -in $script:prerequisiteModuleNames
+        }
+        Mock Install-Module {
+            $script:installationAttempts.Add([string] $Name)
+            if ([string] $Name -eq $script:installationFailure) {
+                throw "Fixture module installation failed."
+            }
+            if (-not $script:hideInstalledModules) {
+                $script:availableModules[[string] $Name] = $true
+            }
+            "Fixture installation output"
+        }
+        Mock Import-Module {
+            $script:importedModules.Add([string] $Name)
+        } -ParameterFilter {
+            ([string] $Name) -in $script:prerequisiteModuleNames
+        }
+        Mock Resolve-SecureM365TenantId {
+            $script:tenantResolutionCount++
+            [guid] "11111111-1111-4111-8111-111111111111"
+        }
+        Mock Write-Warning {}
+    }
+
+    It "installs the same modules as AA for the current user and then continues" {
+        $output = @(& $moduleSetupScript -Confirm:$false)
+
+        ($script:installationAttempts -join ",") | Should Be ($script:prerequisiteModuleNames -join ",")
+        Assert-MockCalled Install-Module -Times 5 -Exactly -Scope It -ParameterFilter {
+            $Scope -eq "CurrentUser" -and $Repository -eq "PSGallery"
+        }
+        $script:importedModules.Count | Should Be 4
+        ($script:importedModules -contains "ExchangeOnlineManagement") | Should Be $false
+        $script:tenantResolutionCount | Should Be 1
+        $output.Count | Should Be 1
+        $output[0] | Should Be "Prerequisites ready"
+    }
+
+    It "continues without reinstalling any modules when they are already available" {
+        foreach ($name in $script:prerequisiteModuleNames) {
+            $script:availableModules[$name] = $true
+        }
+
+        & $moduleSetupScript -Confirm:$false | Should Be "Prerequisites ready"
+
+        Assert-MockCalled Install-Module -Times 0 -Exactly -Scope It
+        $script:importedModules.Count | Should Be 4
+        $script:tenantResolutionCount | Should Be 1
+    }
+
+    It "installs only the missing modules" {
+        foreach ($name in $script:prerequisiteModuleNames[0..2]) {
+            $script:availableModules[$name] = $true
+        }
+
+        & $moduleSetupScript -Confirm:$false | Should Be "Prerequisites ready"
+
+        ($script:installationAttempts -join ",") |
+            Should Be "MicrosoftTeams,ExchangeOnlineManagement"
+        $script:importedModules.Count | Should Be 4
+    }
+
+    It "stops before imports and tenant resolution when installation fails" {
+        $script:installationFailure = "Microsoft.Graph.Identity.SignIns"
+
+        { & $moduleSetupScript -Confirm:$false } | Should Throw "Fixture module installation failed"
+
+        $script:installationAttempts.Count | Should Be 2
+        $script:importedModules.Count | Should Be 0
+        $script:tenantResolutionCount | Should Be 0
+    }
+
+    It "stops if modules remain unavailable after installation" {
+        $script:hideInstalledModules = $true
+
+        { & $moduleSetupScript -Confirm:$false } | Should Throw "Required modules remain unavailable"
+
+        $script:installationAttempts.Count | Should Be 5
+        $script:importedModules.Count | Should Be 0
+        $script:tenantResolutionCount | Should Be 0
+    }
+
+    It "only previews installation under WhatIf when modules are missing" {
+        $output = @(& $moduleSetupScript -WhatIf)
+
+        Assert-MockCalled Install-Module -Times 0 -Exactly -Scope It
+        Assert-MockCalled Write-Warning -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Message -like "Module installation was previewed only.*"
+        }
+        $script:importedModules.Count | Should Be 0
+        $script:tenantResolutionCount | Should Be 0
+        $output.Count | Should Be 0
+    }
+
+    It "continues toward the authenticated WhatIf preview when modules are already installed" {
+        foreach ($name in $script:prerequisiteModuleNames) {
+            $script:availableModules[$name] = $true
+        }
+
+        & $moduleSetupScript -WhatIf | Should Be "Prerequisites ready"
+
+        Assert-MockCalled Install-Module -Times 0 -Exactly -Scope It
+        Assert-MockCalled Write-Warning -Times 0 -Exactly -Scope It
+        $script:importedModules.Count | Should Be 4
+        $script:tenantResolutionCount | Should Be 1
+    }
+}
+
 Describe "Standalone configuration final results" {
     BeforeEach {
         $script:targetTenantId = [guid] "11111111-1111-4111-8111-111111111111"

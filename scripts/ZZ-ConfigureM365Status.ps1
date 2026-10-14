@@ -7,9 +7,12 @@ Configures the Microsoft 365 lab controls in one standalone script.
 .DESCRIPTION
 Combines scripts 04, 06, 10, 12, 14, 16, 18, 20, 30, 40, 42, and 44.
 The necessary SecureM365.Common.psm1 helpers are embedded. No other repository
-script or module is loaded. Requires Windows, PowerShell 7.2 or later, and the
-Microsoft.Graph.Authentication, Microsoft.Graph.Identity.SignIns,
-Microsoft.Graph.Identity.Governance, and MicrosoftTeams modules.
+script or module is loaded. Requires Windows and PowerShell 7.2 or later.
+Like script AA, installs missing Microsoft.Graph.Authentication,
+Microsoft.Graph.Identity.SignIns, Microsoft.Graph.Identity.Governance,
+MicrosoftTeams, and ExchangeOnlineManagement modules from PSGallery for the
+current user. Already-installed modules are reused without being upgraded.
+Only the Graph and Teams modules are imported for configuration.
 
 Creates or verifies the named cloud-only emergency accounts, including permanent
 Global Administrator assignments. Newly generated passwords are saved and
@@ -118,9 +121,12 @@ Return the structured plan or final configuration report, in addition to host
 messages. Passwords and private keys are never included in these results.
 
 .NOTES
--WhatIf performs authenticated discovery with read scopes, but does not create
-passwords, files, certificates, users, applications, grants, or policies.
+-WhatIf previews missing-module installation without installing anything. If
+required modules remain unavailable, it stops before tenant discovery.
+Otherwise, it performs authenticated discovery with read scopes, but does not
+create passwords, files, certificates, users, applications, grants, or policies.
 It does not attempt a Teams connection with an application that is not yet created.
+Missing-module installations have separate ShouldProcess confirmations.
 One high-impact ShouldProcess confirmation covers the displayed configuration plan.
 Existing identities and policies are never silently repaired or overwritten.
 Any failure stops subsequent work and reports confirmed changes; no automatic
@@ -1676,20 +1682,37 @@ if (@($AccountName | Sort-Object -Unique).Count -ne $AccountName.Count) {
 foreach ($id in $TemporaryExceptionAccountId) {
     $null = ConvertTo-SecureM365ObjectId $id.Guid "Temporary exception account"
 }
-$targetTenantId = Resolve-SecureM365TenantId -TenantId $TenantId -PromptIfMissing
-$requiredModules = @(
+$configurationModules = @(
     "Microsoft.Graph.Authentication"
     "Microsoft.Graph.Identity.SignIns"
     "Microsoft.Graph.Identity.Governance"
     "MicrosoftTeams"
 )
+$requiredModules = $configurationModules + "ExchangeOnlineManagement"
+foreach ($moduleName in $requiredModules) {
+    if (-not (Get-Module -ListAvailable -Name $moduleName)) {
+        if ($PSCmdlet.ShouldProcess($moduleName, "Install PowerShell module for the current user")) {
+            $null = Install-Module `
+                -Name $moduleName `
+                -Scope CurrentUser `
+                -Repository PSGallery `
+                -ErrorAction Stop
+        }
+    }
+}
+
 $missingModules = @($requiredModules | Where-Object { -not (Get-Module -ListAvailable -Name $_) })
 if ($missingModules.Count -gt 0) {
-    throw "Install the required modules before configuration: Install-Module -Name $($missingModules -join ',') -Scope CurrentUser -Repository PSGallery"
+    if ($WhatIfPreference) {
+        Write-Warning "Module installation was previewed only. Required modules remain unavailable: $($missingModules -join ', '). No tenant discovery or configuration was performed."
+        return
+    }
+    throw "Required modules remain unavailable: $($missingModules -join ', '). Install them or rerun this script and approve installation."
 }
-foreach ($moduleName in $requiredModules) {
+foreach ($moduleName in $configurationModules) {
     Import-Module $moduleName -ErrorAction Stop
 }
+$targetTenantId = Resolve-SecureM365TenantId -TenantId $TenantId -PromptIfMissing
 $additionalScopes = @("Domain.Read.All", "Organization.Read.All")
 if ($WhatIfPreference) {
     $additionalScopes += "Application.Read.All"

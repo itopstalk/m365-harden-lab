@@ -58,14 +58,20 @@ and recognition limitations described in [tests.md](tests.md) apply.
 `scripts\ZZ-ConfigureM365Status.ps1` combines scripts 04, 06, 10, 12, 14, 16,
 18, 20, 30, 40, 42, and 44, with its required common-module helpers embedded.
 It needs no other repository files. The original scripts remain unchanged.
-Use Windows and PowerShell 7.2 or later with these installed modules:
+Use Windows and PowerShell 7.2 or later. Like script AA, it installs any missing
+prerequisite modules from PSGallery for the current user before connecting.
+Approve installation when prompted; already-installed modules are reused without
+being upgraded. You can also install the same prerequisites manually:
 
 ```powershell
 Install-Module -Name Microsoft.Graph.Authentication,Microsoft.Graph.Identity.SignIns,`
-    Microsoft.Graph.Identity.Governance,MicrosoftTeams -Scope CurrentUser -Repository PSGallery
+    Microsoft.Graph.Identity.Governance,MicrosoftTeams,ExchangeOnlineManagement `
+    -Scope CurrentUser -Repository PSGallery
 ```
 
-Preview with authenticated read-only discovery, then run the configuration:
+With the prerequisites available, preview with authenticated read-only discovery,
+then run the configuration. If modules are missing, `-WhatIf` previews their
+installation and stops without installing anything or connecting to the tenant:
 
 ```powershell
 .\ZZ-ConfigureM365Status.ps1 -TenantId $TenantId -UseGraphBrowserPkce -WhatIf
